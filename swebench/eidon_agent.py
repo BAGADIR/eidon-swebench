@@ -1,28 +1,28 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-Eidon SWE-bench Agent � World-Class Edition
+Eidon SWE-bench Agent — World-Class Edition
 ============================================
 
 Four-stage pipeline per task:
 
-  STAGE 1 � ENCODE
+  STAGE 1 — ENCODE
     `eidon analyze` runs the full 11-phase pipeline on the cloned repo.
     Produces .eidon/encoding: L0-L3 graph-theoretic codebase map.
-      L0 � System topology (spectral, entropy, health vector)
-      L1 � Community topology (Louvain, gravity wells, bridge files)
-      L2 � CodeRank, SPOFs, data-flow taint, circular cycles
-      L3 � Per-file: CodeRank, blast_radius, risk_grade, AI-derived purpose
+      L0 — System topology (spectral, entropy, health vector)
+      L1 — Community topology (Louvain, gravity wells, bridge files)
+      L2 — CodeRank, SPOFs, data-flow taint, circular cycles
+      L3 — Per-file: CodeRank, blast_radius, risk_grade, AI-derived purpose
            + smart-compressed source at the appropriate tier
     Hash-based cache: Phase 7 LLM analysis is reused for unchanged files.
 
-  STAGE 2 � LOCALIZE  (~$0.001/task)
+  STAGE 2 — LOCALIZE  (~$0.001/task)
     DeepSeek V3 reads the Eidon encoding + issue description.
     Outputs a JSON list of 3-5 exact file paths to modify.
     This mirrors what `eidon_encoding(intent=...)` does in the MCP:
     - In MCP: HNSW vector search on intent => top-20 files => Tier 3
     - Here: DeepSeek reasons over the L3 purpose map => surgical selection
 
-  STAGE 3 � PATCH  (~$0.01-0.02/task)
+  STAGE 3 — PATCH  (~$0.01-0.02/task)
     DeepSeek V3 reads:
       - Eidon encoding (full architectural context)
       - Full source of the localized files
@@ -30,7 +30,7 @@ Four-stage pipeline per task:
       - The failing tests (FAIL_TO_PASS) from the SWE-bench task
     Generates a minimal unified diff patch.
 
-  STAGE 4 � VERIFY + REPAIR (up to 2 retries)
+  STAGE 4 — VERIFY + REPAIR (up to 2 retries)
     `git apply --check` validates the patch applies cleanly.
     If it fails, DeepSeek repairs the patch with the error context.
 
@@ -71,7 +71,7 @@ from typing import Optional
 from openai import OpenAI
 from datasets import load_dataset
 
-# -- Config --------------------------------------------------------------------
+# ── Config ────────────────────────────────────────────────────────────────────
 
 DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL   = "https://api.deepseek.com/v1"
@@ -80,12 +80,12 @@ DEEPSEEK_BASE_URL   = "https://api.deepseek.com/v1"
 #   deepseek-chat      = Non-thinking mode. Fast, great for structured JSON output.
 #   deepseek-reasoner  = Thinking mode. Reasons step-by-step before answering.
 #                        Same price. Far better at complex code analysis.
-# Stage 2 (localize):  deepseek-chat     � just needs file identification
-# Stage 3 (patch):     deepseek-reasoner � needs to reason about root cause + fix
-# Stage 4 (repair):    deepseek-reasoner � needs to reason about why hunk failed
+# Stage 2 (localize):  deepseek-chat     — just needs file identification
+# Stage 3 (patch):     deepseek-reasoner — needs to reason about root cause + fix
+# Stage 4 (repair):    deepseek-reasoner — needs to reason about why hunk failed
 MODEL_LOCALIZE      = "deepseek-chat"        # fast, cheap, structured JSON
-MODEL_PATCH         = "deepseek-reasoner"    # thinking mode � best for code repair
-MODEL_REPAIR        = "deepseek-reasoner"    # thinking mode � best for patch repair
+MODEL_PATCH         = "deepseek-reasoner"    # thinking mode — best for code repair
+MODEL_REPAIR        = "deepseek-reasoner"    # thinking mode — best for patch repair
 
 EIDON_BIN           = "eidon"               # installed via: npm install -g eidoncore
 TOKEN_BUDGET        = 32000                  # Eidon encoding token budget
@@ -95,7 +95,7 @@ OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
 MODEL_NAME_TAG      = "eidon-deepseek-r1"    # R1 thinking mode used for patches
 
-# -- Prompts -------------------------------------------------------------------
+# ── Prompts ───────────────────────────────────────────────────────────────────
 
 SYSTEM_LOCALIZE = """\
 You are an expert software engineer analyzing a GitHub issue.
@@ -244,7 +244,7 @@ Output the corrected unified diff patch. Output ONLY the raw patch.
 """
 
 
-# -- Agent ---------------------------------------------------------------------
+# ── Agent ─────────────────────────────────────────────────────────────────────
 
 class EidonAgent:
     def __init__(self, cache_dir: Optional[str] = None):
@@ -269,7 +269,7 @@ class EidonAgent:
             + self.total_output_tokens * 0.42 / 1_000_000
         )
 
-    # -- Repo management -------------------------------------------------------
+    # ── Repo management ───────────────────────────────────────────────────────
 
     def get_repo_dir(self, repo: str, base_commit: str, tmp_root: str) -> tuple:
         """
@@ -293,7 +293,7 @@ class EidonAgent:
         url = "https://github.com/{}.git".format(repo)
         print("  [git] Cloning {}@{}...".format(repo, base_commit[:8]))
         try:
-            # Shallow clone � much faster than full clone for large repos
+            # Shallow clone — much faster than full clone for large repos
             r = subprocess.run(
                 ["git", "clone", "--depth=1", url, repo_dir],
                 capture_output=True, text=True, timeout=300,
@@ -307,7 +307,7 @@ class EidonAgent:
                 cwd=repo_dir, capture_output=True, text=True, timeout=60,
             )
             if r.returncode != 0:
-                # Commit not in depth=1 � fetch ONLY that specific commit
+                # Commit not in depth=1 — fetch ONLY that specific commit
                 # (avoids --unshallow which downloads entire multi-GB history)
                 print("  [git] Fetching specific commit {}...".format(base_commit[:8]))
                 subprocess.run(
@@ -340,7 +340,7 @@ class EidonAgent:
             print("  [git] Error: {}".format(e))
             return False
 
-    # -- Stage 1: Encode -------------------------------------------------------
+    # ── Stage 1: Encode ───────────────────────────────────────────────────────
 
     def encode_repo(self, repo_path: str) -> str:
         """Run `eidon analyze` and return .eidon/encoding content."""
@@ -360,7 +360,7 @@ class EidonAgent:
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=480,    # 8 min max � if eidon hangs past this, skip and continue
+            timeout=480,    # 8 min max — if eidon hangs past this, skip and continue
             env=env,
         )
 
@@ -389,7 +389,7 @@ class EidonAgent:
         print("  [eidon] WARNING: no encoding produced")
         return ""
 
-    # -- Stage 2: Localize -----------------------------------------------------
+    # ── Stage 2: Localize ─────────────────────────────────────────────────────
 
     def localize_files(self, encoding: str, task: dict) -> list:
         """
@@ -452,7 +452,7 @@ class EidonAgent:
             paths = re.findall(r'[\w./\-]+\.py', raw)
             return list(dict.fromkeys(paths))[:5]
 
-    # -- Stage 2b: Read full source --------------------------------------------
+    # ── Stage 2b: Read full source ────────────────────────────────────────────
 
     def read_file_sources(self, file_paths: list, repo_dir: str) -> str:
         """Read full source of localized files. Returns formatted string."""
@@ -475,7 +475,7 @@ class EidonAgent:
 
         return "\n\n".join(sections)
 
-    # -- Stage 3: Generate patch -----------------------------------------------
+    # ── Stage 3: Generate patch ───────────────────────────────────────────────
 
     def generate_patch(self, encoding: str, file_sources: str, task: dict) -> str:
         """
@@ -542,7 +542,7 @@ class EidonAgent:
 
         return (response.choices[0].message.content or "").strip()
 
-    # -- Stage 4: Verify + repair ----------------------------------------------
+    # ── Stage 4: Verify + repair ──────────────────────────────────────────────
 
     def verify_patch(self, patch: str, repo_dir: str) -> tuple:
         """Run `git apply --check`. Returns (ok, error_message)."""
@@ -590,7 +590,7 @@ class EidonAgent:
 
         return (response.choices[0].message.content or "").strip()
 
-    # -- Patch extraction ------------------------------------------------------
+    # ── Patch extraction ──────────────────────────────────────────────────────
 
     def extract_patch(self, raw: str) -> str:
         """Strip markdown fences and extract the raw unified diff."""
@@ -619,7 +619,7 @@ class EidonAgent:
         print("  [warn] Could not extract a valid patch from model output")
         return ""
 
-    # -- Full pipeline ---------------------------------------------------------
+    # ── Full pipeline ─────────────────────────────────────────────────────────
 
     def solve_task(self, task: dict, repo_dir: str, skip_encode: bool = False) -> str:
         """
@@ -676,7 +676,7 @@ class EidonAgent:
         return patch
 
 
-# -- Checkpoint helpers --------------------------------------------------------
+# ── Checkpoint helpers ────────────────────────────────────────────────────────
 
 def _load_checkpoint():
     predictions = []
@@ -696,7 +696,7 @@ def _save_checkpoint(predictions):
         json.dump(predictions, f, indent=2)
 
 
-# -- Main benchmark runner -----------------------------------------------------
+# ── Main benchmark runner ─────────────────────────────────────────────────────
 
 def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
     agent = EidonAgent(cache_dir=cache_dir)
@@ -780,7 +780,7 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
     return predictions
 
 
-# -- Entry point ---------------------------------------------------------------
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
