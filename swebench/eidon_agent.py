@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Eidon SWE-bench Agent — World-Class Edition
 ============================================
@@ -393,7 +393,8 @@ class EidonAgent:
         env["EIDON_LLM_BASE_URL"]    = DEEPSEEK_BASE_URL
         env["EIDON_LLM_API_KEY"]     = DEEPSEEK_API_KEY or ""
         env["EIDON_LLM_MODEL"]       = MODEL_LOCALIZE  # deepseek-chat for eidon analysis phase
-        env["EIDON_LLM_CONCURRENCY"] = "50"            # 50 parallel LLM calls
+        env["EIDON_LLM_CONCURRENCY"]    = "50"            # 50 parallel LLM calls (Phase 7)
+        env["EIDON_WORKER_CONCURRENCY"] = "50"            # 50 parallel workers  (Phase 2 parse/graph)
         env["EIDON_ENCODING_TOKENS"] = str(TOKEN_BUDGET)
         # SWE-bench only needs the base L0-L3 encoding — skip post-analysis passes
         # that are designed for ongoing code monitoring, not one-shot patch generation
@@ -410,12 +411,12 @@ class EidonAgent:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=600,    # 10 min -- partial encoding is still read after timeout
+                timeout=1200,   # 20 min -- partial encoding is still read after timeout
                 env=env,
             )
         except subprocess.TimeoutExpired:
             timed_out = True
-            print("  [eidon] Timed out after 600s -- reading partial encoding if available")
+            print("  [eidon] Timed out after 1200s -- reading partial encoding if available")
 
         elapsed = time.time() - start
 
