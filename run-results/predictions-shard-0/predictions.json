@@ -1,0 +1,52 @@
+[
+  {
+    "instance_id": "astropy__astropy-12907",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-13033",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-13236",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-13398",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-13453",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-13579",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-13977",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-14096",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-14182",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  },
+  {
+    "instance_id": "astropy__astropy-14309",
+    "model_patch": "",
+    "model_name_or_path": "eidon-deepseek-r1"
+  }
+]
