@@ -123,8 +123,9 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          python eidon_agent.py \
+          python -u eidon_agent.py \
             --tasks ${{ matrix.limit }} \
             --offset ${{ matrix.offset }}
         # 4-stage pipeline per task:
