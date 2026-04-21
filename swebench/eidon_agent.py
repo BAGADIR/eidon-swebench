@@ -1,28 +1,28 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-Eidon SWE-bench Agent — World-Class Edition
+Eidon SWE-bench Agent -- World-Class Edition
 ============================================
 
 Four-stage pipeline per task:
 
-  STAGE 1 — ENCODE
+  STAGE 1 -- ENCODE
     `eidon analyze` runs the full 11-phase pipeline on the cloned repo.
     Produces .eidon/encoding: L0-L3 graph-theoretic codebase map.
-      L0 — System topology (spectral, entropy, health vector)
-      L1 — Community topology (Louvain, gravity wells, bridge files)
-      L2 — CodeRank, SPOFs, data-flow taint, circular cycles
-      L3 — Per-file: CodeRank, blast_radius, risk_grade, AI-derived purpose
+      L0 -- System topology (spectral, entropy, health vector)
+      L1 -- Community topology (Louvain, gravity wells, bridge files)
+      L2 -- CodeRank, SPOFs, data-flow taint, circular cycles
+      L3 -- Per-file: CodeRank, blast_radius, risk_grade, AI-derived purpose
            + smart-compressed source at the appropriate tier
     Hash-based cache: Phase 7 LLM analysis is reused for unchanged files.
 
-  STAGE 2 — LOCALIZE  (~$0.001/task)
+  STAGE 2 -- LOCALIZE  (~$0.001/task)
     DeepSeek V3 reads the Eidon encoding + issue description.
     Outputs a JSON list of 3-5 exact file paths to modify.
     This mirrors what `eidon_encoding(intent=...)` does in the MCP:
     - In MCP: HNSW vector search on intent => top-20 files => Tier 3
     - Here: DeepSeek reasons over the L3 purpose map => surgical selection
 
-  STAGE 3 — PATCH  (~$0.01-0.02/task)
+  STAGE 3 -- PATCH  (~$0.01-0.02/task)
     DeepSeek V3 reads:
       - Eidon encoding (full architectural context)
       - Full source of the localized files
@@ -30,7 +30,7 @@ Four-stage pipeline per task:
       - The failing tests (FAIL_TO_PASS) from the SWE-bench task
     Generates a minimal unified diff patch.
 
-  STAGE 4 — VERIFY + REPAIR (up to 2 retries)
+  STAGE 4 -- VERIFY + REPAIR (up to 2 retries)
     `git apply --check` validates the patch applies cleanly.
     If it fails, DeepSeek repairs the patch with the error context.
 
@@ -80,12 +80,12 @@ DEEPSEEK_BASE_URL   = "https://api.deepseek.com/v1"
 #   deepseek-chat      = Non-thinking mode. Fast, great for structured JSON output.
 #   deepseek-reasoner  = Thinking mode. Reasons step-by-step before answering.
 #                        Same price. Far better at complex code analysis.
-# Stage 2 (localize):  deepseek-chat     — just needs file identification
-# Stage 3 (patch):     deepseek-reasoner — needs to reason about root cause + fix
-# Stage 4 (repair):    deepseek-reasoner — needs to reason about why hunk failed
+# Stage 2 (localize):  deepseek-chat     -- just needs file identification
+# Stage 3 (patch):     deepseek-reasoner -- needs to reason about root cause + fix
+# Stage 4 (repair):    deepseek-reasoner -- needs to reason about why hunk failed
 MODEL_LOCALIZE      = "deepseek-chat"        # fast, cheap, structured JSON
-MODEL_PATCH         = "deepseek-reasoner"    # thinking mode — best for code repair
-MODEL_REPAIR        = "deepseek-reasoner"    # thinking mode — best for patch repair
+MODEL_PATCH         = "deepseek-reasoner"    # thinking mode -- best for code repair
+MODEL_REPAIR        = "deepseek-reasoner"    # thinking mode -- best for patch repair
 
 EIDON_BIN           = "eidon"               # installed via: npm install -g eidoncore
 TOKEN_BUDGET        = 32000                  # Eidon encoding token budget
@@ -293,7 +293,7 @@ class EidonAgent:
         url = "https://github.com/{}.git".format(repo)
         print("  [git] Cloning {}@{}...".format(repo, base_commit[:8]))
         try:
-            # Shallow clone — much faster than full clone for large repos
+            # Shallow clone -- much faster than full clone for large repos
             r = subprocess.run(
                 ["git", "clone", "--depth=1", url, repo_dir],
                 capture_output=True, text=True, timeout=300,
@@ -307,7 +307,7 @@ class EidonAgent:
                 cwd=repo_dir, capture_output=True, text=True, timeout=60,
             )
             if r.returncode != 0:
-                # Commit not in depth=1 — fetch ONLY that specific commit
+                # Commit not in depth=1 -- fetch ONLY that specific commit
                 # (avoids --unshallow which downloads entire multi-GB history)
                 print("  [git] Fetching specific commit {}...".format(base_commit[:8]))
                 subprocess.run(
@@ -360,7 +360,7 @@ class EidonAgent:
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=480,    # 8 min max — if eidon hangs past this, skip and continue
+            timeout=480,    # 8 min max -- if eidon hangs past this, skip and continue
             env=env,
         )
 
