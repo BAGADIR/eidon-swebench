@@ -81,11 +81,20 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Eidon CLI
-        run: npm install -g eidoncore
-        # eidoncore is the published npm package name.
-        # postinstall downloads the pre-built platform binary from releases.eidon.dev.
-        # The binary is self-contained (pkg'd) — no TS compilation needed.
+      - name: Install Eidon CLI from source
+        run: |
+          # Install from GitHub source so the EIDON_PHASE7_FILE_LIMIT patch is included.
+          # tsx runs TypeScript directly — no compilation step needed.
+          git clone --depth=1 https://github.com/BAGADIR/Eidon.git /tmp/eidon-src
+          cd /tmp/eidon-src
+          npm install --ignore-scripts
+          npm install -g tsx
+          # Create a wrapper script so `eidon` CLI works from PATH
+          cat > /usr/local/bin/eidon << 'EOF'
+          #!/bin/bash
+          exec tsx /tmp/eidon-src/src/cli/main.ts "$@"
+          EOF
+          chmod +x /usr/local/bin/eidon
 
       - name: Verify Eidon
         run: eidon --version

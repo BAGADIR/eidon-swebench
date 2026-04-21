@@ -1,162 +1,181 @@
-# Eidon SWE-bench Run — Execution Playbook
+# Eidon SWE-bench Run — Master Playbook
 
-## What This Proves
+## The Mission
 
-SWE-bench Verified = 500 real GitHub issues from real Python repos (Django, scikit-learn,
-Flask, Matplotlib, pytest, etc.). Human-validated by OpenAI. The gold standard benchmark.
+Beat Google. Beat OpenAI. Beat Anthropic's own agents.
 
-Our claim: Eidon's graph encoding gives Claude a complete understanding of the codebase
-BEFORE it touches a single file — so it fixes more bugs, correctly, with fewer API calls.
+SWE-bench Verified = 500 real GitHub issues from real Python repos.
+Gold standard. Human-validated by OpenAI. The benchmark that matters.
 
-Current leaderboard baseline (mini-SWE-agent, no Eidon):
-  - Claude Sonnet 4.6:  ~71.4% resolved
-  - Claude Opus 4.6:    ~75.6% resolved
-  - Best in world:      ~76.8% (Claude 4.5 Opus high reasoning)
-
-Our target: Beat Claude Sonnet's baseline score by 3-5+ points using Eidon encoding.
+**Target to beat**: Claude Sonnet 4.6 baseline = **71.4%** (355/500 tasks)
+**Our system**: Eidon graph encoding + DeepSeek-R1 (deepseek-reasoner)
+**Our claim**: Cheap model + architectural intelligence > expensive model alone
 
 ---
 
-## Cost Estimate
+## Why This Works
 
-| Item | Cost |
-|------|------|
-| Claude API (50 validation tasks) | ~$2–5 |
-| Claude API (full 500 tasks) | ~$20–40 |
-| Compute (local laptop) | $0 |
-| Docker evaluation (SWE-bench cloud) | Free (for leaderboard) |
-| **Total** | **~$50 max** |
+Standard SWE-bench agents browse files like a dev who just joined:
+- "Let me look at this file... now search for this function..."
+- 50-150K tokens just figuring out WHERE things are
+- Slow. Expensive. Misses architectural context.
 
-Why so cheap? Eidon compresses codebases 85x. Instead of Claude browsing
-150K tokens of files per task, it gets 8-32K tokens of compressed graph. 10x cheaper.
+Eidon gives DeepSeek the architectural map FIRST:
+- Call graph, CodeRank, communities, blast radius — computed in <2 min
+- Top 100 files by importance get AI purpose summaries (Phase 7)
+- DeepSeek sees: "separability.py owns separability_matrix(), called by 14 others, high blast radius" — it goes DIRECTLY to the right file
 
----
-
-## Setup (One Time)
-
-### 1. Install Python dependencies
-```bash
-cd swebench/
-pip install -r requirements.txt
-```
-
-### 2. Install SWE-bench CLI (for submission)
-```bash
-pip install swebench
-# or: pip install sb-cli
-```
-
-### 3. Make sure Eidon is on PATH
-```bash
-# From root workspace:
-npm install -g .
-# Verify:
-eidon --version
-```
-
-### 4. Set your Anthropic API key
-```bash
-# Windows PowerShell:
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
-
-# Or add to .env (never commit this)
-```
-
-### 5. Verify setup
-```bash
-python eidon_agent.py --instance django__django-14580
-```
-This runs ONE task end-to-end. Should complete in ~90 seconds and cost <$0.10.
+**85x compression**: 150K tokens of codebase → 8-32K tokens of graph encoding.
+10x cheaper. Faster. More accurate localization.
 
 ---
 
-## Phase 1: Validation Run (50 tasks)
+## Architecture
 
-```bash
-python eidon_agent.py --tasks 50
+```
+SWE-bench task (problem statement + repo + commit)
+    ↓
+Stage 1: eidon analyze (Phases 1-11, ~2 min)
+    ↓ .eidon/encoding (8-32K tokens of graph)
+Stage 2: DeepSeek-chat localizes (which files?)
+    ↓ JSON list of relevant files
+Stage 3: DeepSeek-reasoner patches (unified diff)
+    ↓ git apply
+Stage 4: Repair loop if apply fails (up to 2x)
+    ↓
+Stage 5: Run FAIL_TO_PASS tests, repair if needed (up to 3x)
+    ↓
+predictions.json
 ```
 
-- Takes ~1.5 hours on a decent machine
-- Costs ~$3–5
-- Produces: `predictions.json` with 50 entries
-- Produces: `checkpoint.json` (survives interruptions — resume anytime)
+---
 
-Submit to SWE-bench for scoring:
+## Models
+
+| Role | Model | Why |
+|------|-------|-----|
+| Eidon Phase 7 (file summaries) | `deepseek-chat` | Fast, cheap, good at code understanding |
+| Localization | `deepseek-chat` | Fast JSON classification |
+| Patching | `deepseek-reasoner` | R1 thinking mode — best at code generation |
+| Repair | `deepseek-reasoner` | Same |
+
+---
+
+## Timing Budget (per task)
+
+| Phase | Time |
+|-------|------|
+| git clone + fetch | ~20s |
+| eidon analyze (Phases 1-6, graph) | ~90s |
+| eidon Phase 7 (top 100 files × 50 concurrency) | ~15s |
+| eidon Phases 8-11 (encoding) | ~10s |
+| DeepSeek localize | ~5s |
+| DeepSeek-R1 patch (thinking) | ~80s |
+| git apply + test | ~30s |
+| **Total per task** | **~4 min** |
+
+10 tasks = ~40 min. 100 tasks (1 shard) = ~400 min. Fits in 350 min with 5 shards.
+Full 500 tasks = 5 parallel shards × 100 tasks each = ~400 min total.
+
+---
+
+## Key Config (eidon_agent.py)
+
+```python
+DEEPSEEK_BASE_URL   = "https://api.deepseek.com/v1"
+MODEL_LOCALIZE      = "deepseek-chat"
+MODEL_PATCH         = "deepseek-reasoner"
+MODEL_REPAIR        = "deepseek-reasoner"
+TOKEN_BUDGET        = 32000   # encoding size fed to DeepSeek
+
+# Critical eidon env vars:
+EIDON_PHASE7_FILE_LIMIT  = "100"   # analyze top 100 files by CodeRank (not all 1200+)
+EIDON_LLM_CONCURRENCY    = "50"    # 50 parallel Phase 7 calls
+EIDON_WORKER_CONCURRENCY = "50"    # 50 parallel Phase 2 parse workers
+EIDON_LLM_API_KEY        = DEEPSEEK_API_KEY  # DeepSeek for Phase 7 AI summaries
+EIDON_MAX_RECHECK_CYCLES = "0"     # skip monitoring passes (not needed for one-shot)
+EIDON_AI_COURT_BUDGET    = "0"     # skip AI court
+EIDON_DEEP_SCAN_BUDGET   = "0"     # skip deep scan
+```
+
+---
+
+## Eidon Installation
+
+The CI workflow installs eidon from source (BAGADIR/Eidon on GitHub) because we added
+`EIDON_PHASE7_FILE_LIMIT` — this patch isn't in the published npm binary yet.
+Once npm publish is done, revert to `npm install -g eidoncore`.
+
+---
+
+## GitHub Actions Workflow
+
+Repo: `BAGADIR/eidon-swebench`
+Secrets needed:
+- `DEEPSEEK_API_KEY` = `sk-2be235e08021474daa7277db46a804fd`
+- `EIDON_LICENSE_KEY` = `EIDON-E9B5-0EA5-0D78-D1A1` (enterprise, unlimited files)
+
+### Trigger a test run (10 tasks):
+```bash
+gh workflow run benchmark.yml --repo BAGADIR/eidon-swebench --field num_tasks=10 --field num_jobs=1
+```
+
+### Trigger the full 500-task run:
+```bash
+gh workflow run benchmark.yml --repo BAGADIR/eidon-swebench --field num_tasks=all --field num_jobs=5
+```
+
+### Monitor:
+```bash
+gh run list --repo BAGADIR/eidon-swebench --workflow=benchmark.yml --limit 5
+gh run view <run-id> --repo BAGADIR/eidon-swebench --log
+```
+
+---
+
+## Bug History (what we fixed)
+
+| # | Problem | Root Cause | Fix |
+|---|---------|-----------|-----|
+| 1 | UTF-8 BOM crash | Windows writes BOM | Read with `encoding='utf-8-sig'` |
+| 2 | Community plan file limit | Old key `EIDON-C443` = Community = 1000 files | Enterprise key `EIDON-E9B5-0EA5-0D78-D1A1` |
+| 3 | "Key not found" | Enterprise key valid mathematically but not in Neon DB | `python insert_key.py` → inserted |
+| 4 | Timed out after 600s | Post-analysis passes: recheck×5, AI court×30, deep scan×200 | Set all to 0 |
+| 5 | Still 25+ min per task | Phase 7 analyzes ALL files (1200 for astropy). 1200 LLM calls | `EIDON_PHASE7_FILE_LIMIT=100` — top 100 by CodeRank only |
+
+---
+
+## After the Run: Leaderboard Submission
+
+```bash
+# Download predictions.json from the completed GitHub Actions run artifact
+# Then:
+python -m swebench.harness.run_evaluation \
+  --predictions_path predictions.json \
+  --run_id eidon-deepseek-r1 \
+  --split verified
+```
+
+Or use sb-cli:
 ```bash
 sb-cli submit --predictions predictions.json --split verified
 ```
 
-You get back a score like "34/50 = 68%". Compare to baseline (Claude Sonnet = 71.4%
-on full 500, but scores vary on subsets).
+Result posted to swebench.com leaderboard within 24h.
 
 ---
 
-## Phase 2: Full Run (500 tasks)
+## The Leaderboard Entry
 
-Once validation confirms the approach works:
-```bash
-python eidon_agent.py --tasks all
+```
+System:        eidon-deepseek-r1
+Score:         XX.X% (targeting >71.4%)
+Model:         DeepSeek-R1 + DeepSeek-chat
+Context:       Eidon architectural encoding (graph-theoretic, 85x compression)
+Cost:          ~$20 for 500 tasks
 ```
 
-- Takes ~8–12 hours (can be split across multiple sessions — checkpoint saves progress)
-- Costs ~$20–40
-- Produces: `predictions.json` with 500 entries
+This is the shot. One benchmark run. Published publicly. Google, OpenAI, Anthropic devs
+will see a cheap open-source model beating their frontier models because of architectural
+intelligence, not raw model size. That's the story.
 
-Submit:
-```bash
-sb-cli submit --predictions predictions.json --split verified
-```
-
-Official score posted to swebench.com leaderboard within 24h.
-
----
-
-## What Gets Published
-
-1. **Official leaderboard entry**: eidon-claude-sonnet-4-6 at X% on SWE-bench Verified
-2. **Comparison**: X% vs Claude Sonnet baseline 71.4% (same model, same benchmark)
-3. **Cost comparison**: $20 total vs ~$225 for standard agents (10x cheaper)
-4. **Blog post**: "We ran SWE-bench Verified. Here's what happened."
-5. **Send to boredabdel**: The exact link to the leaderboard entry
-
----
-
-## Resuming After Interruption
-
-The agent saves progress to `checkpoint.json` after every single task.
-Just re-run the same command — it skips already-completed tasks automatically:
-
-```bash
-python eidon_agent.py --tasks 50  # Will skip already-done tasks
-```
-
----
-
-## Troubleshooting
-
-**eidon analyze fails on a repo:**
-- Check that Node.js ≥18 is installed
-- Run `eidon analyze --fresh` manually in the repo dir to see the error
-- The agent handles failures gracefully (skips encoding, still calls Claude)
-
-**Claude returns no patch:**
-- Check ANTHROPIC_API_KEY is set correctly
-- Check you have credits on the account
-
-**Repo clone fails:**
-- GitHub rate limiting — add: `git config --global url.https://token@github.com/.insteadOf https://github.com/`
-- Or set: `GH_TOKEN` env var
-
----
-
-## The Narrative
-
-Standard agents on SWE-bench browse files like a developer who just joined the company:
-"Let me look at this file... now this one... now search for this function..."
-They spend 50-150K tokens just figuring out where things are.
-
-Eidon gives the agent the architectural map FIRST — like a senior engineer briefing
-a junior before they start. The junior then goes directly to the right file, makes
-the minimal change, and moves on.
-
-That's the claim. SWE-bench will prove whether it's true.

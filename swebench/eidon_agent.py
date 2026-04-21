@@ -389,13 +389,18 @@ class EidonAgent:
         start = time.time()
 
         env = os.environ.copy()
-        # Do NOT set EIDON_LLM_API_KEY — no API key means llm.ask() returns
-        # fallbackResponse() instantly (zero HTTP calls). Phase 7 (per-file LLM
-        # summaries) becomes a no-op. Phases 1-6 + 11 produce the full
-        # graph-theoretic encoding (communities, CodeRank, call graph) in <60s.
-        env["EIDON_LLM_API_KEY"]        = ""       # empty = skip Phase 7 LLM calls
-        env["EIDON_WORKER_CONCURRENCY"] = "50"     # 50 parallel workers (Phase 2 parse/graph)
+        env["EIDON_LLM_PROVIDER"]       = "openai"
+        env["EIDON_LLM_BASE_URL"]       = DEEPSEEK_BASE_URL
+        env["EIDON_LLM_API_KEY"]        = DEEPSEEK_API_KEY or ""
+        env["EIDON_LLM_MODEL"]          = MODEL_LOCALIZE       # deepseek-chat for Phase 7
+        env["EIDON_LLM_CONCURRENCY"]    = "50"                 # 50 parallel Phase 7 calls
+        env["EIDON_WORKER_CONCURRENCY"] = "50"                 # 50 parallel Phase 2 workers
         env["EIDON_ENCODING_TOKENS"]    = str(TOKEN_BUDGET)
+        # KEY FIX: only analyze top 100 files by CodeRank in Phase 7.
+        # Eidon already sorts by CodeRank desc, so these are the most architecturally
+        # important files. 100 files / 50 concurrency = 2 batches = ~15s for Phase 7.
+        # Full 1200-file analysis would take 25+ min per repo (unacceptable for 500 tasks).
+        env["EIDON_PHASE7_FILE_LIMIT"]  = "100"
         env["EIDON_MAX_RECHECK_CYCLES"] = "0"
         env["EIDON_RECHECK_BUDGET"]     = "0"
         env["EIDON_AI_COURT_BUDGET"]    = "0"
