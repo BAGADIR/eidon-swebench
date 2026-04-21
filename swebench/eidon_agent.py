@@ -541,7 +541,10 @@ class EidonAgent:
         if response.usage:
             in_tok      = response.usage.prompt_tokens
             out_tok     = response.usage.completion_tokens
-            reason_tok  = (response.usage.completion_tokens_details or {}).get("reasoning_tokens", 0)
+            details     = response.usage.completion_tokens_details
+            reason_tok  = (getattr(details, "reasoning_tokens", None) or
+                           (details.get("reasoning_tokens", 0) if hasattr(details, "get") else 0)
+                           ) if details else 0
             self.total_input_tokens  += in_tok
             self.total_output_tokens += out_tok
             cost = (in_tok * 0.28 + out_tok * 0.42) / 1_000_000
