@@ -293,8 +293,9 @@ class EidonAgent:
         url = "https://github.com/{}.git".format(repo)
         print("  [git] Cloning {}@{}...".format(repo, base_commit[:8]))
         try:
+            # Shallow clone — much faster than full clone for large repos
             r = subprocess.run(
-                ["git", "clone", "--depth=50", url, repo_dir],
+                ["git", "clone", "--depth=1", url, repo_dir],
                 capture_output=True, text=True, timeout=300,
             )
             if r.returncode != 0:
@@ -306,9 +307,11 @@ class EidonAgent:
                 cwd=repo_dir, capture_output=True, text=True, timeout=60,
             )
             if r.returncode != 0:
-                print("  [git] Commit not in shallow history, deepening...")
+                # Commit not in depth=1 — fetch ONLY that specific commit
+                # (avoids --unshallow which downloads entire multi-GB history)
+                print("  [git] Fetching specific commit {}...".format(base_commit[:8]))
                 subprocess.run(
-                    ["git", "fetch", "--unshallow"],
+                    ["git", "fetch", "--depth=1", "origin", base_commit],
                     cwd=repo_dir, capture_output=True, timeout=300,
                 )
                 r = subprocess.run(
@@ -316,8 +319,19 @@ class EidonAgent:
                     cwd=repo_dir, capture_output=True, text=True, timeout=60,
                 )
                 if r.returncode != 0:
-                    print("  [git] Checkout failed: {}".format(r.stderr[:200]))
-                    return False
+                    # Last resort: deepen by 500 commits
+                    print("  [git] Deepening by 500 commits...")
+                    subprocess.run(
+                        ["git", "fetch", "--deepen=500", "origin"],
+                        cwd=repo_dir, capture_output=True, timeout=300,
+                    )
+                    r = subprocess.run(
+                        ["git", "checkout", base_commit],
+                        cwd=repo_dir, capture_output=True, text=True, timeout=60,
+                    )
+                    if r.returncode != 0:
+                        print("  [git] Checkout failed: {}".format(r.stderr[:200]))
+                        return False
             return True
         except subprocess.TimeoutExpired:
             print("  [git] Timed out")
@@ -346,7 +360,7 @@ class EidonAgent:
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=1200,   # 20 minutes for large repos (Django, sympy)
+            timeout=480,    # 8 min max — if eidon hangs past this, skip and continue
             env=env,
         )
 

@@ -66,6 +66,7 @@ jobs:
   run-shard:
     needs: setup
     runs-on: ubuntu-latest
+    timeout-minutes: 90   # hard cap: 10 tasks × ~8 min each = ~80 min max
     strategy:
       fail-fast: false   # let other shards continue even if one fails
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
