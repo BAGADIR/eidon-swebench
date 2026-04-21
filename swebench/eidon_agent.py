@@ -393,8 +393,15 @@ class EidonAgent:
         env["EIDON_LLM_BASE_URL"]    = DEEPSEEK_BASE_URL
         env["EIDON_LLM_API_KEY"]     = DEEPSEEK_API_KEY or ""
         env["EIDON_LLM_MODEL"]       = MODEL_LOCALIZE  # deepseek-chat for eidon analysis phase
-        env["EIDON_LLM_CONCURRENCY"] = "50"  # 50 concurrent = ~1200 files / 50 = 24 batches x 2s = ~48s
+        env["EIDON_LLM_CONCURRENCY"] = "50"            # 50 parallel LLM calls
         env["EIDON_ENCODING_TOKENS"] = str(TOKEN_BUDGET)
+        # SWE-bench only needs the base L0-L3 encoding — skip post-analysis passes
+        # that are designed for ongoing code monitoring, not one-shot patch generation
+        env["EIDON_MAX_RECHECK_CYCLES"] = "0"   # default 5 — skip re-verification passes
+        env["EIDON_RECHECK_BUDGET"]     = "0"   # default 50
+        env["EIDON_AI_COURT_BUDGET"]    = "0"   # default 30 — skip AI court verification
+        env["EIDON_DEEP_SCAN_BUDGET"]   = "0"   # default 200 — skip deep scan phase
+        env["EIDON_LLM_REANALYSIS"]     = "false"  # no live re-analysis
 
         timed_out = False
         try:
