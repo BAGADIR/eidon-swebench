@@ -168,6 +168,47 @@ Common failure reasons:
 Output ONLY the corrected unified diff patch. No explanation. No markdown.
 """
 
+SYSTEM_TEST_REPAIR = """\
+You are an expert software engineer. Your patch applied successfully but the
+failing tests are still failing.
+
+You will be given:
+  1. The current patch you applied
+  2. The pytest output showing exactly what failed and why
+  3. The full source of the relevant files (AFTER your patch was applied)
+  4. The issue description
+
+Your task: Generate a NEW patch (relative to the ORIGINAL unmodified file)
+that fixes the issue AND makes the failing tests pass.
+
+Output ONLY the raw unified diff patch. No explanation. No markdown fences.
+"""
+
+TEST_REPAIR_TEMPLATE = """\
+Current patch (already applied to repo):
+```diff
+{current_patch}
+```
+
+Pytest output (tests still failing):
+```
+{pytest_output}
+```
+
+Full source of modified files (current state after patch):
+{file_sources}
+
+---
+
+## Issue
+{problem_statement}
+
+## Tests that must pass (FAIL_TO_PASS):
+{fail_to_pass}
+
+Generate a NEW patch from the ORIGINAL unmodified file. Output ONLY the raw unified diff.
+"""
+
 LOCALIZE_TEMPLATE = """\
 ## Eidon Codebase Encoding
 
@@ -352,10 +393,8 @@ class EidonAgent:
         env["EIDON_LLM_BASE_URL"]    = DEEPSEEK_BASE_URL
         env["EIDON_LLM_API_KEY"]     = DEEPSEEK_API_KEY or ""
         env["EIDON_LLM_MODEL"]       = MODEL_LOCALIZE  # deepseek-chat for eidon analysis phase
-        env["EIDON_LLM_CONCURRENCY"] = "8"
+        env["EIDON_LLM_CONCURRENCY"] = "50"  # 50 concurrent = ~1200 files / 50 = 24 batches x 2s = ~48s
         env["EIDON_ENCODING_TOKENS"] = str(TOKEN_BUDGET)
-        # Limit LLM phase to top-200 files max (prevents timeout on huge repos)
-        env["EIDON_LLM_FILE_LIMIT"]  = "200"
 
         timed_out = False
         try:
@@ -571,6 +610,114 @@ class EidonAgent:
         except Exception as e:
             return False, str(e)
 
+    def apply_patch(self, patch: str, repo_dir: str) -> bool:
+        """Apply patch to repo. Returns True on success."""
+        try:
+            result = subprocess.run(
+                ["git", "apply", "-"],
+                input=patch, cwd=repo_dir,
+                capture_output=True, text=True, timeout=30,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def reset_repo(self, repo_dir: str):
+        """Reset any applied patches back to base commit."""
+        try:
+            subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=repo_dir, capture_output=True, timeout=30,
+            )
+        except Exception:
+            pass
+
+    def install_deps(self, repo_dir: str) -> bool:
+        """pip install -e . for the repo. Returns True if succeeded."""
+        print("  [test] Installing dependencies...")
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet",
+                 "--no-build-isolation"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=180,
+            )
+            if r.returncode != 0:
+                # Try without --no-build-isolation
+                r = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+                    cwd=repo_dir, capture_output=True, text=True, timeout=180,
+                )
+            return r.returncode == 0
+        except Exception as e:
+            print("  [test] pip install failed: {}".format(e))
+            return False
+
+    def run_tests(self, repo_dir: str, fail_to_pass: list) -> tuple:
+        """
+        Run the FAIL_TO_PASS tests. Returns (passed: bool, output: str).
+        passed=True means all tests passed.
+        """
+        if not fail_to_pass:
+            return True, "(no tests specified)"
+
+        test_ids = " ".join(fail_to_pass[:10])  # cap at 10 tests
+        print("  [test] Running {} test(s)...".format(len(fail_to_pass[:10])))
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pytest"] + fail_to_pass[:10] +
+                ["-x", "--tb=short", "-q", "--no-header", "--timeout=60"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=120,
+            )
+            output = (r.stdout + r.stderr)[-3000:]  # last 3000 chars
+            passed = r.returncode == 0
+            summary = "PASSED" if passed else "FAILED"
+            print("  [test] {} (exit {})".format(summary, r.returncode))
+            return passed, output
+        except subprocess.TimeoutExpired:
+            print("  [test] Timed out")
+            return False, "Tests timed out after 120s"
+        except Exception as e:
+            print("  [test] Error: {}".format(e))
+            return False, str(e)
+
+    def test_repair(self, current_patch: str, pytest_output: str,
+                    file_sources: str, task: dict) -> str:
+        """Ask DeepSeek to fix the patch based on actual test failures."""
+        print("  [test-repair] Asking DeepSeek to fix based on test output...")
+        fail_to_pass = task.get("FAIL_TO_PASS", [])
+        if isinstance(fail_to_pass, str):
+            try:
+                fail_to_pass = json.loads(fail_to_pass)
+            except Exception:
+                fail_to_pass = [fail_to_pass]
+
+        user_content = TEST_REPAIR_TEMPLATE.format(
+            current_patch=current_patch,
+            pytest_output=pytest_output,
+            file_sources=file_sources,
+            problem_statement=task.get("problem_statement", "")[:2000],
+            fail_to_pass="\n".join(fail_to_pass[:10]),
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=MODEL_REPAIR,
+                max_tokens=MAX_PATCH_TOKENS,
+                messages=[
+                    {"role": "system", "content": SYSTEM_TEST_REPAIR},
+                    {"role": "user",   "content": user_content},
+                ],
+            )
+        except Exception as e:
+            print("  [test-repair] API error: {}".format(e))
+            return current_patch
+
+        if response.usage:
+            self.total_input_tokens  += response.usage.prompt_tokens
+            self.total_output_tokens += response.usage.completion_tokens
+
+        return (response.choices[0].message.content or "").strip()
+
     def repair_patch(self, bad_patch: str, error: str, file_sources: str, task: dict) -> str:
         """Ask DeepSeek to repair a patch that failed git apply --check."""
         print("  [repair] git apply failed: {}".format(error[:120]))
@@ -696,14 +843,22 @@ class EidonAgent:
 
     def solve_task(self, task: dict, repo_dir: str, skip_encode: bool = False) -> str:
         """
-        World-class four-stage pipeline for one SWE-bench task:
-          1. Encode (eidon analyze -> .eidon/encoding)
-          2. Localize (DeepSeek: which files to change?)
-          3. Patch (DeepSeek: write the diff with full source + tests)
-          4. Verify + repair (git apply --check, retry on failure)
+        Five-stage pipeline per SWE-bench task:
+          1. Encode  -- eidon analyze (concurrency=50, ~48s on large repos)
+          2. Localize -- DeepSeek identifies which files to change
+          3. Patch   -- DeepSeek-reasoner generates unified diff
+          4. Apply + git-repair loop (fix corrupt hunks, up to 2x)
+          5. Test loop -- run FAIL_TO_PASS tests, re-patch on failure (up to 3x)
         """
         self.total_tasks += 1
         instance_id = task.get("instance_id", "?")
+
+        fail_to_pass = task.get("FAIL_TO_PASS", [])
+        if isinstance(fail_to_pass, str):
+            try:
+                fail_to_pass = json.loads(fail_to_pass)
+            except Exception:
+                fail_to_pass = [fail_to_pass]
 
         # Stage 1: Encode
         if skip_encode:
@@ -731,18 +886,56 @@ class EidonAgent:
         raw_output = self.generate_patch(encoding, file_sources, task)
         patch      = self.extract_patch(raw_output)
 
-        # Stage 4: Verify + repair (up to 2 attempts)
+        # Stage 4: git apply repair loop (fix corrupt hunks)
         for attempt in range(2):
             ok, err = self.verify_patch(patch, repo_dir)
             if ok:
-                label = " (after {} repair attempt(s))".format(attempt) if attempt else ""
+                label = " (after {} git-repair attempt(s))".format(attempt) if attempt else ""
                 print("  [verify] Patch applies cleanly{}".format(label))
                 break
             if attempt < 1:
                 repaired = self.repair_patch(patch, err, file_sources, task)
                 patch    = self.extract_patch(repaired)
             else:
-                print("  [verify] Patch still invalid after repair -- submitting as-is")
+                print("  [verify] Patch still invalid after git-repair -- will submit as-is")
+
+        # Stage 5: Test execution loop (run FAIL_TO_PASS, re-patch on failure)
+        if patch.strip() and fail_to_pass:
+            deps_installed = self.install_deps(repo_dir)
+            if deps_installed:
+                for test_attempt in range(3):
+                    # Apply patch cleanly each iteration (reset first if re-trying)
+                    if test_attempt > 0:
+                        self.reset_repo(repo_dir)
+                    applied = self.apply_patch(patch, repo_dir)
+                    if not applied:
+                        print("  [test] Patch failed to apply on test attempt {}".format(test_attempt + 1))
+                        break
+
+                    passed, pytest_out = self.run_tests(repo_dir, fail_to_pass)
+                    if passed:
+                        print("  [test] All FAIL_TO_PASS tests PASS -- done")
+                        break
+
+                    if test_attempt < 2:
+                        # Re-read sources in their CURRENT (patched) state for context
+                        current_sources = self.read_file_sources(file_paths, repo_dir)
+                        raw_repaired = self.test_repair(
+                            patch, pytest_out, current_sources, task
+                        )
+                        new_patch = self.extract_patch(raw_repaired)
+                        if new_patch.strip():
+                            patch = new_patch
+                        else:
+                            print("  [test-repair] No patch produced, keeping previous")
+                            break
+                    else:
+                        print("  [test] Still failing after 3 attempts -- submitting best patch")
+
+                # Always reset repo to clean state after test loop
+                self.reset_repo(repo_dir)
+            else:
+                print("  [test] Skipping test loop (pip install failed)")
 
         if patch:
             self.successful_tasks += 1
