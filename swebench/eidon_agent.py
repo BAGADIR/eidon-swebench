@@ -604,31 +604,93 @@ class EidonAgent:
     # ── Patch extraction ──────────────────────────────────────────────────────
 
     def extract_patch(self, raw: str) -> str:
-        """Strip markdown fences and extract the raw unified diff."""
+        """Strip markdown fences, extract the unified diff, and fix hunk headers."""
         s = raw.strip()
         if not s:
             return ""
 
+        # 1. Extract from markdown fences if present
+        extracted = None
         if s.startswith("diff ") or s.startswith("--- "):
-            return s
+            extracted = s
+        else:
+            for pattern in [
+                r"```diff\n(.*?)```",
+                r"```patch\n(.*?)```",
+                r"```\n(.*?)```",
+            ]:
+                m = re.search(pattern, s, re.DOTALL)
+                if m:
+                    candidate = m.group(1).strip()
+                    if "---" in candidate and "+++" in candidate:
+                        extracted = candidate
+                        break
 
-        for pattern in [
-            r"```diff\n(.*?)```",
-            r"```patch\n(.*?)```",
-            r"```\n(.*?)```",
-        ]:
-            m = re.search(pattern, s, re.DOTALL)
-            if m:
-                candidate = m.group(1).strip()
-                if "---" in candidate and "+++" in candidate:
-                    return candidate
+            if extracted is None:
+                for i, line in enumerate(s.split("\n")):
+                    if line.startswith("--- ") or line.startswith("diff --git"):
+                        extracted = "\n".join(s.split("\n")[i:])
+                        break
 
-        for i, line in enumerate(s.split("\n")):
-            if line.startswith("--- ") or line.startswith("diff --git"):
-                return "\n".join(s.split("\n")[i:])
+        if not extracted:
+            print("  [warn] Could not extract a valid patch from model output")
+            return ""
 
-        print("  [warn] Could not extract a valid patch from model output")
-        return ""
+        # 2. Recalculate hunk headers to fix wrong line counts
+        return self._fix_hunk_headers(extracted)
+
+    def _fix_hunk_headers(self, patch: str) -> str:
+        """Recount lines in each hunk and rewrite @@ headers to match."""
+        lines = patch.split("\n")
+        out   = []
+        i     = 0
+        while i < len(lines):
+            line = lines[i]
+            # Pass through file headers unchanged
+            if (line.startswith("diff ") or line.startswith("--- ") or
+                    line.startswith("+++ ") or line.startswith("index ") or
+                    line.startswith("new file") or line.startswith("deleted file") or
+                    line.startswith("old mode") or line.startswith("new mode")):
+                out.append(line)
+                i += 1
+                continue
+
+            if line.startswith("@@"):
+                # Collect hunk lines
+                hunk_lines = []
+                i += 1
+                while i < len(lines) and not (
+                    lines[i].startswith("@@") or
+                    lines[i].startswith("diff ") or
+                    lines[i].startswith("--- ")
+                ):
+                    hunk_lines.append(lines[i])
+                    i += 1
+
+                # Parse old start from existing header
+                m = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)", line)
+                if m:
+                    old_start = int(m.group(1))
+                    new_start = int(m.group(2))
+                    tail      = m.group(3)
+                else:
+                    out.append(line)
+                    out.extend(hunk_lines)
+                    continue
+
+                # Recount
+                old_count = sum(1 for l in hunk_lines if not l.startswith("+"))
+                new_count = sum(1 for l in hunk_lines if not l.startswith("-"))
+
+                old_part = str(old_start) if old_count == 1 else "{},{}".format(old_start, old_count)
+                new_part = str(new_start) if new_count == 1 else "{},{}".format(new_start, new_count)
+                out.append("@@ -{} +{} @@{}".format(old_part, new_part, tail))
+                out.extend(hunk_lines)
+            else:
+                out.append(line)
+                i += 1
+
+        return "\n".join(out)
 
     # ── Full pipeline ─────────────────────────────────────────────────────────
 
