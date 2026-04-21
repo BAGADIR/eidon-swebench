@@ -1,0 +1,220 @@
+name: SWE-bench Verified — Eidon + DeepSeek V3
+
+# Trigger manually from Actions tab.
+# Pass num_tasks=all for the full 500-task run.
+# Pass num_tasks=50 for a quick validation run (~2h, ~$0.50).
+on:
+  workflow_dispatch:
+    inputs:
+      num_tasks:
+        description: "Number of tasks to run. Use 'all' for full 500."
+        required: false
+        default: "all"
+      num_jobs:
+        description: "Parallel jobs (shards). 5 = 100 tasks each."
+        required: false
+        default: "5"
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  # Eidon uses these to call DeepSeek for Phase 7 deep analysis
+  EIDON_LLM_PROVIDER: openai
+  EIDON_LLM_BASE_URL: https://api.deepseek.com/v1
+  EIDON_LLM_MODEL: deepseek-chat
+  EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  EIDON_LLM_CONCURRENCY: "8"
+
+jobs:
+  # ── Determine shard offsets ─────────────────────────────────────────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    steps:
+      - id: build-matrix
+        run: |
+          NUM_JOBS=${{ github.event.inputs.num_jobs || '5' }}
+          NUM_TASKS=${{ github.event.inputs.num_tasks || 'all' }}
+
+          if [ "$NUM_TASKS" = "all" ]; then
+            TOTAL=500
+          else
+            TOTAL=$NUM_TASKS
+          fi
+
+          TASKS_PER_JOB=$(( (TOTAL + NUM_JOBS - 1) / NUM_JOBS ))
+
+          MATRIX="["
+          for i in $(seq 0 $((NUM_JOBS - 1))); do
+            OFFSET=$(( i * TASKS_PER_JOB ))
+            LIMIT=$TASKS_PER_JOB
+            # Last shard may have fewer tasks — cap at TOTAL
+            if [ $(( OFFSET + LIMIT )) -gt $TOTAL ]; then
+              LIMIT=$(( TOTAL - OFFSET ))
+            fi
+            if [ $LIMIT -le 0 ]; then
+              break
+            fi
+            if [ "$MATRIX" != "[" ]; then MATRIX="$MATRIX,"; fi
+            MATRIX="$MATRIX{\"shard\":$i,\"offset\":$OFFSET,\"limit\":$LIMIT}"
+          done
+          MATRIX="$MATRIX]"
+
+          echo "matrix={\"include\":$MATRIX}" >> "$GITHUB_OUTPUT"
+
+  # ── Run benchmark shards in parallel ────────────────────────────────────────
+  run-shard:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # let other shards continue even if one fails
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+
+    steps:
+      - name: Checkout benchmark repo
+        uses: actions/checkout@v4
+
+      # ── Node.js + Eidon binary ─────────────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Eidon CLI
+        run: npm install -g eidoncore
+        # eidoncore is the published npm package name.
+        # postinstall downloads the pre-built platform binary from releases.eidon.dev.
+        # The binary is self-contained (pkg'd) — no TS compilation needed.
+
+      - name: Verify Eidon
+        run: eidon --version
+
+      - name: Authenticate Eidon
+        env:
+          EIDON_LICENSE_KEY: ${{ secrets.EIDON_LICENSE_KEY }}
+        run: eidon activate "$EIDON_LICENSE_KEY"
+        # Writes licenseKey to ~/.eidon/config.json.
+        # requireAuth() in eidon analyze reads licenseKey from there and passes
+        # (step 7: licenseKey exists, no token → fail-open revocation check → pass).
+
+      # ── Python + dependencies ──────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r swebench/requirements.txt
+          pip install swebench  # for sb-cli submission tool
+
+      # ── Git (large repo clones need depth) ────────────────────────────────
+      - name: Configure git
+        run: |
+          git config --global user.email "eidon-bench@noreply.github.com"
+          git config --global user.name "Eidon Bench"
+
+      # ── Run this shard ─────────────────────────────────────────────────────
+      - name: Run benchmark shard ${{ matrix.shard }}
+        working-directory: swebench
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python eidon_agent.py \
+            --tasks ${{ matrix.limit }} \
+            --offset ${{ matrix.offset }}
+        # 4-stage pipeline per task:
+        #   1. eidon analyze  -> .eidon/encoding (L0-L3 graph oracle)
+        #   2. DeepSeek localize -> 3-5 exact files to modify
+        #   3. DeepSeek patch  -> unified diff (full source + tests + hints)
+        #   4. git apply --check + repair loop (2 retries)
+
+      # ── Upload shard predictions ───────────────────────────────────────────
+      - name: Upload predictions (shard ${{ matrix.shard }})
+        uses: actions/upload-artifact@v4
+        if: always()  # upload even on partial failure (checkpoint value)
+        with:
+          name: predictions-shard-${{ matrix.shard }}
+          path: swebench/predictions.json
+          retention-days: 7
+
+  # ── Merge shards + submit to leaderboard ────────────────────────────────────
+  merge-and-submit:
+    needs: run-shard
+    runs-on: ubuntu-latest
+    if: always()  # run even if some shards failed (partial submission)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install swebench CLI
+        run: pip install swebench
+
+      - name: Download all shard predictions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: predictions-shard-*
+          path: artifacts/
+
+      - name: Merge predictions
+        run: |
+          python - <<'EOF'
+          import json, glob, os
+
+          all_preds = {}
+          for path in glob.glob("artifacts/predictions-shard-*/predictions.json"):
+              with open(path) as f:
+                  shard = json.load(f)
+              for pred in shard:
+                  instance_id = pred.get("instance_id")
+                  if instance_id and instance_id not in all_preds:
+                      # First shard wins (in case of overlap)
+                      all_preds[instance_id] = pred
+
+          merged = list(all_preds.values())
+          with open("predictions.json", "w") as f:
+              json.dump(merged, f, indent=2)
+
+          print(f"Merged {len(merged)} predictions from {len(glob.glob('artifacts/predictions-shard-*/predictions.json'))} shards")
+          EOF
+
+      - name: Show prediction stats
+        run: |
+          python - <<'EOF'
+          import json
+          with open("predictions.json") as f:
+              preds = json.load(f)
+          total = len(preds)
+          with_patch = sum(1 for p in preds if p.get("model_patch", "").strip())
+          print(f"Total predictions: {total}")
+          print(f"With patch:        {with_patch} ({with_patch/total*100:.1f}%)")
+          print(f"Empty patch:       {total - with_patch}")
+          EOF
+
+      - name: Upload merged predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictions-merged
+          path: predictions.json
+          retention-days: 30
+
+      - name: Submit to SWE-bench leaderboard
+        env:
+          SWEBENCH_API_KEY: ${{ secrets.SWEBENCH_API_KEY }}
+        run: |
+          echo "To submit to the leaderboard, run:"
+          echo "  sb-cli submit --predictions predictions.json --split verified"
+          echo ""
+          echo "Or download the artifact and submit manually from your machine."
+          echo "The leaderboard at https://swebench.com/verified.html updates within 24h."
+          # Automated submission (uncomment when SWEBENCH_API_KEY is set):
+          # sb-cli submit --predictions predictions.json --split verified
