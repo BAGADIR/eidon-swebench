@@ -411,12 +411,12 @@ class EidonAgent:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=1200,   # 20 min -- partial encoding is still read after timeout
+                timeout=1000000, # no limit
                 env=env,
             )
         except subprocess.TimeoutExpired:
             timed_out = True
-            print("  [eidon] Timed out after 1200s -- reading partial encoding if available")
+            print("  [eidon] Timed out after 1000000s -- reading partial encoding if available")
 
         elapsed = time.time() - start
 
