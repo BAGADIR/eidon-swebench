@@ -337,7 +337,7 @@ class EidonAgent:
         env["EIDON_LLM_PROVIDER"]    = "openai"
         env["EIDON_LLM_BASE_URL"]    = DEEPSEEK_BASE_URL
         env["EIDON_LLM_API_KEY"]     = DEEPSEEK_API_KEY or ""
-        env["EIDON_LLM_MODEL"]       = MODEL
+        env["EIDON_LLM_MODEL"]       = MODEL_LOCALIZE  # deepseek-chat for eidon analysis phase
         env["EIDON_LLM_CONCURRENCY"] = "8"
         env["EIDON_ENCODING_TOKENS"] = str(TOKEN_BUDGET)
 
