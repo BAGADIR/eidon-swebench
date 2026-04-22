@@ -415,52 +415,48 @@ class EidonAgent:
             return os.path.join(tmp_root, "repo"), False
 
     def clone_repo(self, repo: str, base_commit: str, repo_dir: str) -> bool:
-        """Clone repo and checkout base_commit. Returns True on success."""
+        """Shallow-clone repo then checkout base_commit. Always uses --depth=1."""
         url = "https://github.com/{}.git".format(repo)
-        print("  [git] Cloning {}...".format(repo))
+        print("  [git] Cloning {} (shallow)...".format(repo))
         try:
-            if self.cache_dir:
-                # Full clone — this repo will be reused for many different base_commits.
-                # A shallow clone can't switch between arbitrary commits.
-                r = subprocess.run(
-                    ["git", "clone", url, repo_dir],
-                    capture_output=True, text=True, timeout=600,
-                )
-            else:
-                # Shallow clone — ephemeral, only one task, much faster.
-                r = subprocess.run(
-                    ["git", "clone", "--depth=1", url, repo_dir],
-                    capture_output=True, text=True, timeout=300,
-                )
+            r = subprocess.run(
+                ["git", "clone", "--depth=1", url, repo_dir],
+                capture_output=True, text=True, timeout=300,
+            )
             if r.returncode != 0:
                 print("  [git] Clone failed: {}".format(r.stderr[:300]))
                 return False
             return self.checkout_commit(repo_dir, base_commit)
         except subprocess.TimeoutExpired:
-            print("  [git] Timed out")
+            print("  [git] Clone timed out")
             return False
         except Exception as e:
             print("  [git] Error: {}".format(e))
             return False
 
     def checkout_commit(self, repo_dir: str, base_commit: str) -> bool:
-        """Checkout a specific commit on an existing clone."""
+        """
+        Checkout a specific commit.
+        Strategy: try directly, then fetch that exact commit at depth=1.
+        This works even on shallow clones without downloading full history.
+        """
         try:
+            # Try direct checkout first (works if commit is already local)
             r = subprocess.run(
                 ["git", "checkout", base_commit],
-                cwd=repo_dir, capture_output=True, text=True, timeout=60,
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
             )
             if r.returncode == 0:
                 return True
-            # Not in local history — fetch it explicitly
+            # Fetch exactly this commit (depth=1 — no history needed)
             print("  [git] Fetching {}...".format(base_commit[:8]))
             subprocess.run(
-                ["git", "fetch", "origin", base_commit],
+                ["git", "fetch", "--depth=1", "origin", base_commit],
                 cwd=repo_dir, capture_output=True, timeout=120,
             )
             r = subprocess.run(
                 ["git", "checkout", base_commit],
-                cwd=repo_dir, capture_output=True, text=True, timeout=60,
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
             )
             if r.returncode != 0:
                 print("  [git] Checkout failed: {}".format(r.stderr[:200]))
@@ -481,9 +477,10 @@ class EidonAgent:
         env["EIDON_LLM_BASE_URL"]       = DEEPSEEK_BASE_URL
         env["EIDON_LLM_API_KEY"]        = DEEPSEEK_API_KEY or ""
         env["EIDON_LLM_MODEL"]          = "deepseek-chat"      # fast for Phase 7
-        env["EIDON_LLM_CONCURRENCY"]    = "50"                 # 50 parallel Phase 7 calls
-        env["EIDON_WORKER_CONCURRENCY"] = "50"                 # 50 parallel Phase 2 workers
+        env["EIDON_LLM_CONCURRENCY"]    = "20"                 # 20 parallel Phase 7 LLM calls
+        env["EIDON_WORKER_CONCURRENCY"] = "20"                 # 20 parallel Phase 2 workers
         env["EIDON_ENCODING_TOKENS"]    = str(TOKEN_BUDGET)
+        env["EIDON_PHASE7_FILE_LIMIT"]  = "200"               # top-200 files by CodeRank only
         env["EIDON_MAX_RECHECK_CYCLES"] = "0"
         env["EIDON_RECHECK_BUDGET"]     = "0"
         env["EIDON_AI_COURT_BUDGET"]    = "0"
