@@ -28,7 +28,7 @@ jobs:
   # run-shard jobs download these -> agent skips analyze entirely.
   pre-analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 240
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -36,10 +36,10 @@ jobs:
         include: [{"repo": "astropy/astropy", "key": "astropy__astropy"}, {"repo": "django/django", "key": "django__django"}, {"repo": "matplotlib/matplotlib", "key": "matplotlib__matplotlib"}, {"repo": "mwaskom/seaborn", "key": "mwaskom__seaborn"}, {"repo": "pallets/flask", "key": "pallets__flask"}, {"repo": "psf/requests", "key": "psf__requests"}, {"repo": "pydata/xarray", "key": "pydata__xarray"}, {"repo": "pylint-dev/pylint", "key": "pylint-dev__pylint"}, {"repo": "pytest-dev/pytest", "key": "pytest-dev__pytest"}, {"repo": "scikit-learn/scikit-learn", "key": "scikit-learn__scikit-learn"}, {"repo": "sphinx-doc/sphinx", "key": "sphinx-doc__sphinx"}, {"repo": "sympy/sympy", "key": "sympy__sympy"}]
 
     steps:
-      - name: Set up Node.js 20
+      - name: Set up Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install Eidon CLI
         run: npm install -g eidoncore
@@ -135,10 +135,10 @@ jobs:
           echo "=== Preloaded DBs ==="
           find /tmp/eidon-preload -name "eidon.db" -exec ls -lh {} \; 2>/dev/null || echo "none"
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install Eidon CLI
         run: npm install -g eidoncore
