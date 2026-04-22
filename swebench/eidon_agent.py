@@ -397,14 +397,17 @@ class EidonAgent:
     def get_repo_dir(self, repo: str, base_commit: str, tmp_root: str) -> tuple:
         """
         Returns (repo_dir, already_analyzed).
-        If --cache-dir is set and (repo, commit) is cached, returns it.
+        Cache key is REPO-ONLY (not repo+commit).
+        SWE-bench Verified has 500 tasks across only ~12 repos — caching by repo
+        means eidon analyze runs once per repo (~12x total) not once per task (~500x).
+        Different base_commits on the same repo are handled by git checkout.
         """
         if self.cache_dir:
-            cache_key = repo.replace("/", "__") + "_" + base_commit[:12]
+            cache_key = repo.replace("/", "__")
             repo_dir  = os.path.join(self.cache_dir, cache_key)
             db_path   = os.path.join(repo_dir, ".eidon", "eidon.db")
             if os.path.exists(db_path):
-                print("  [cache] HIT: {}@{}".format(repo, base_commit[:8]))
+                print("  [cache] HIT: {} (db exists)".format(repo))
                 return repo_dir, True
             os.makedirs(repo_dir, exist_ok=True)
             return repo_dir, False
@@ -412,55 +415,58 @@ class EidonAgent:
             return os.path.join(tmp_root, "repo"), False
 
     def clone_repo(self, repo: str, base_commit: str, repo_dir: str) -> bool:
-        """Clone repo at base_commit. Returns True on success."""
+        """Clone repo and checkout base_commit. Returns True on success."""
         url = "https://github.com/{}.git".format(repo)
-        print("  [git] Cloning {}@{}...".format(repo, base_commit[:8]))
+        print("  [git] Cloning {}...".format(repo))
         try:
-            # Shallow clone — much faster than full clone for large repos
-            r = subprocess.run(
-                ["git", "clone", "--depth=1", url, repo_dir],
-                capture_output=True, text=True, timeout=300,
-            )
+            if self.cache_dir:
+                # Full clone — this repo will be reused for many different base_commits.
+                # A shallow clone can't switch between arbitrary commits.
+                r = subprocess.run(
+                    ["git", "clone", url, repo_dir],
+                    capture_output=True, text=True, timeout=600,
+                )
+            else:
+                # Shallow clone — ephemeral, only one task, much faster.
+                r = subprocess.run(
+                    ["git", "clone", "--depth=1", url, repo_dir],
+                    capture_output=True, text=True, timeout=300,
+                )
             if r.returncode != 0:
                 print("  [git] Clone failed: {}".format(r.stderr[:300]))
                 return False
-
-            r = subprocess.run(
-                ["git", "checkout", base_commit],
-                cwd=repo_dir, capture_output=True, text=True, timeout=60,
-            )
-            if r.returncode != 0:
-                # Commit not in depth=1 — fetch ONLY that specific commit
-                # (avoids --unshallow which downloads entire multi-GB history)
-                print("  [git] Fetching specific commit {}...".format(base_commit[:8]))
-                subprocess.run(
-                    ["git", "fetch", "--depth=1", "origin", base_commit],
-                    cwd=repo_dir, capture_output=True, timeout=300,
-                )
-                r = subprocess.run(
-                    ["git", "checkout", base_commit],
-                    cwd=repo_dir, capture_output=True, text=True, timeout=60,
-                )
-                if r.returncode != 0:
-                    # Last resort: deepen by 500 commits
-                    print("  [git] Deepening by 500 commits...")
-                    subprocess.run(
-                        ["git", "fetch", "--deepen=500", "origin"],
-                        cwd=repo_dir, capture_output=True, timeout=300,
-                    )
-                    r = subprocess.run(
-                        ["git", "checkout", base_commit],
-                        cwd=repo_dir, capture_output=True, text=True, timeout=60,
-                    )
-                    if r.returncode != 0:
-                        print("  [git] Checkout failed: {}".format(r.stderr[:200]))
-                        return False
-            return True
+            return self.checkout_commit(repo_dir, base_commit)
         except subprocess.TimeoutExpired:
             print("  [git] Timed out")
             return False
         except Exception as e:
             print("  [git] Error: {}".format(e))
+            return False
+
+    def checkout_commit(self, repo_dir: str, base_commit: str) -> bool:
+        """Checkout a specific commit on an existing clone."""
+        try:
+            r = subprocess.run(
+                ["git", "checkout", base_commit],
+                cwd=repo_dir, capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode == 0:
+                return True
+            # Not in local history — fetch it explicitly
+            print("  [git] Fetching {}...".format(base_commit[:8]))
+            subprocess.run(
+                ["git", "fetch", "origin", base_commit],
+                cwd=repo_dir, capture_output=True, timeout=120,
+            )
+            r = subprocess.run(
+                ["git", "checkout", base_commit],
+                cwd=repo_dir, capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode != 0:
+                print("  [git] Checkout failed: {}".format(r.stderr[:200]))
+            return r.returncode == 0
+        except Exception as e:
+            print("  [git] checkout_commit error: {}".format(e))
             return False
 
     # ── Stage 1: Encode ───────────────────────────────────────────────────────
@@ -1002,11 +1008,10 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
         if str(num_tasks) != "all" and num_tasks != -1:
             tasks = tasks[:int(num_tasks)]
 
-    # Sort by (repo, base_commit) so all tasks sharing the same commit run consecutively.
-    # First task does the full eidon analysis; every subsequent task at the SAME commit
-    # hits the cache in get_repo_dir() → skip_encode=True → 0 min for eidon.
-    # Also, between tasks on the SAME repo at DIFFERENT commits, eidon reuses Phase 7
-    # per-file hash results for unchanged files (no --fresh = cache-aware mode).
+    # Sort by repo so all tasks for the same repo run consecutively.
+    # First task per repo: full eidon analyze (~1-2 min). All subsequent tasks
+    # for the SAME repo: skip_encode=True → just git checkout + MCP query.
+    # SWE-bench Verified = 500 tasks, ~12 repos → ~12 eidon analyze calls total.
     tasks.sort(key=lambda t: (t["repo"], t["base_commit"]))
 
     total = len(tasks)
@@ -1029,12 +1034,21 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
             if cache_dir is None and os.path.exists(repo_dir):
                 shutil.rmtree(repo_dir, ignore_errors=True)
 
-            cloned = True
             if not os.path.exists(os.path.join(repo_dir, ".git")):
                 cloned = agent.clone_repo(task["repo"], task["base_commit"], repo_dir)
+            else:
+                # Repo already cloned (cached) — just switch to the right commit.
+                # Reset any leftover changes from the previous task first.
+                subprocess.run(["git", "reset", "--hard"], cwd=repo_dir,
+                               capture_output=True, timeout=30)
+                subprocess.run(["git", "clean", "-fd"], cwd=repo_dir,
+                               capture_output=True, timeout=30)
+                cloned = agent.checkout_commit(repo_dir, task["base_commit"])
+                if cloned:
+                    print("  [git] Checked out {}".format(task["base_commit"][:8]))
 
             if not cloned:
-                print("  [error] Clone failed -- submitting empty patch")
+                print("  [error] Clone/checkout failed -- submitting empty patch")
                 predictions.append({
                     "instance_id":        inst_id,
                     "model_patch":        "",
