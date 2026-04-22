@@ -1,14 +1,14 @@
-name: SWE-bench Verified -- Eidon + DeepSeek V3
+name: SWE-bench Verified -- Eidon + DeepSeek Reasoner
 
 on:
   workflow_dispatch:
     inputs:
       num_tasks:
-        description: "Number of tasks to run. Use 'all' for full 500."
+        description: "Number of tasks (use 'all' for full 500)"
         required: false
         default: "all"
       num_jobs:
-        description: "Parallel jobs (shards). 5 = 100 tasks each."
+        description: "Parallel shard jobs"
         required: false
         default: "5"
 
@@ -18,9 +18,72 @@ env:
   EIDON_LLM_BASE_URL: https://api.deepseek.com/v1
   EIDON_LLM_MODEL: deepseek-chat
   EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-  EIDON_LLM_CONCURRENCY: "8"
+  EIDON_LLM_CONCURRENCY: "20"
+  EIDON_PHASE7_FILE_LIMIT: "200"
 
 jobs:
+
+  # ── Analyze all 12 SWE-bench repos in parallel ─────────────────────────────
+  # Uploads eidon.db as artifact "eidon-db-<key>" for each repo.
+  # run-shard jobs download these -> agent skips analyze entirely.
+  pre-analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: [{"repo": "astropy/astropy", "key": "astropy__astropy"}, {"repo": "django/django", "key": "django__django"}, {"repo": "matplotlib/matplotlib", "key": "matplotlib__matplotlib"}, {"repo": "mwaskom/seaborn", "key": "mwaskom__seaborn"}, {"repo": "pallets/flask", "key": "pallets__flask"}, {"repo": "psf/requests", "key": "psf__requests"}, {"repo": "pydata/xarray", "key": "pydata__xarray"}, {"repo": "pylint-dev/pylint", "key": "pylint-dev__pylint"}, {"repo": "pytest-dev/pytest", "key": "pytest-dev__pytest"}, {"repo": "scikit-learn/scikit-learn", "key": "scikit-learn__scikit-learn"}, {"repo": "sphinx-doc/sphinx", "key": "sphinx-doc__sphinx"}, {"repo": "sympy/sympy", "key": "sympy__sympy"}]
+
+    steps:
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Eidon CLI
+        run: npm install -g eidoncore
+
+      - name: Authenticate Eidon
+        env:
+          EIDON_LICENSE_KEY: ${{ secrets.EIDON_LICENSE_KEY }}
+        run: eidon activate "$EIDON_LICENSE_KEY"
+
+      - name: Configure git
+        run: |
+          git config --global user.email "eidon-bench@noreply.github.com"
+          git config --global user.name "Eidon Bench"
+          git config --global advice.detachedHead false
+
+      - name: Clone ${{ matrix.repo }} (shallow)
+        run: |
+          git clone --depth=1 https://github.com/${{ matrix.repo }}.git /tmp/repo
+          echo "Cloned ${{ matrix.repo }}"
+
+      - name: Run eidon analyze
+        env:
+          EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EIDON_PHASE7_FILE_LIMIT: "200"
+          EIDON_LLM_CONCURRENCY: "20"
+          EIDON_MAX_RECHECK_CYCLES: "0"
+          EIDON_RECHECK_BUDGET: "0"
+          EIDON_AI_COURT_BUDGET: "0"
+          EIDON_DEEP_SCAN_BUDGET: "0"
+          EIDON_LLM_REANALYSIS: "false"
+        run: |
+          cd /tmp/repo
+          eidon analyze
+          ls -lh .eidon/ || (echo "ERROR: .eidon dir not created" && exit 1)
+          echo "DB size: $(du -sh .eidon/eidon.db 2>/dev/null || echo 'not found')"
+
+      - name: Upload Eidon DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: eidon-db-${{ matrix.key }}
+          path: /tmp/repo/.eidon/eidon.db
+          if-no-files-found: warn
+          retention-days: 1
+
+  # ── Build shard matrix ─────────────────────────────────────────────────────
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -30,34 +93,23 @@ jobs:
         run: |
           NUM_JOBS=${{ github.event.inputs.num_jobs || '5' }}
           NUM_TASKS=${{ github.event.inputs.num_tasks || 'all' }}
-
-          if [ "$NUM_TASKS" = "all" ]; then
-            TOTAL=500
-          else
-            TOTAL=$NUM_TASKS
-          fi
-
+          if [ "$NUM_TASKS" = "all" ]; then TOTAL=500; else TOTAL=$NUM_TASKS; fi
           TASKS_PER_JOB=$(( (TOTAL + NUM_JOBS - 1) / NUM_JOBS ))
-
           MATRIX="["
           for i in $(seq 0 $((NUM_JOBS - 1))); do
             OFFSET=$(( i * TASKS_PER_JOB ))
             LIMIT=$TASKS_PER_JOB
-            if [ $(( OFFSET + LIMIT )) -gt $TOTAL ]; then
-              LIMIT=$(( TOTAL - OFFSET ))
-            fi
-            if [ $LIMIT -le 0 ]; then
-              break
-            fi
+            if [ $(( OFFSET + LIMIT )) -gt $TOTAL ]; then LIMIT=$(( TOTAL - OFFSET )); fi
+            if [ $LIMIT -le 0 ]; then break; fi
             if [ "$MATRIX" != "[" ]; then MATRIX="$MATRIX,"; fi
-            MATRIX="$MATRIX{\"shard\":$i,\"offset\":$OFFSET,\"limit\":$LIMIT}"
+            MATRIX="$MATRIX{"shard":$i,"offset":$OFFSET,"limit":$LIMIT}"
           done
           MATRIX="$MATRIX]"
+          echo "matrix={"include":$MATRIX}" >> "$GITHUB_OUTPUT"
 
-          echo "matrix={\"include\":$MATRIX}" >> "$GITHUB_OUTPUT"
-
+  # ── Run benchmark shards ───────────────────────────────────────────────────
   run-shard:
-    needs: setup
+    needs: [pre-analyze, setup]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -68,6 +120,19 @@ jobs:
       - name: Checkout benchmark repo
         uses: actions/checkout@v4
 
+      - name: Download all Eidon DBs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: eidon-db-*
+          path: /tmp/eidon-preload
+          merge-multiple: false
+        continue-on-error: true
+
+      - name: List preloaded DBs
+        run: |
+          echo "=== Preloaded DBs ==="
+          find /tmp/eidon-preload -name "eidon.db" -exec ls -lh {} \; 2>/dev/null || echo "none"
+
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -75,9 +140,6 @@ jobs:
 
       - name: Install Eidon CLI
         run: npm install -g eidoncore
-
-      - name: Verify Eidon
-        run: eidon --version
 
       - name: Authenticate Eidon
         env:
@@ -100,12 +162,14 @@ jobs:
         run: |
           git config --global user.email "eidon-bench@noreply.github.com"
           git config --global user.name "Eidon Bench"
+          git config --global advice.detachedHead false
 
       - name: Run benchmark shard ${{ matrix.shard }}
         working-directory: swebench
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EIDON_PRELOAD_DIR: /tmp/eidon-preload
           PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p /tmp/eidon-cache
@@ -122,11 +186,11 @@ jobs:
           path: swebench/predictions.json
           retention-days: 7
 
+  # ── Merge + submit ─────────────────────────────────────────────────────────
   merge-and-submit:
     needs: run-shard
     runs-on: ubuntu-latest
     if: always()
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -177,7 +241,7 @@ jobs:
               print(f"With patch:  {with_patch} ({with_patch/total*100:.1f}%)")
               print(f"Empty patch: {empty} ({empty/total*100:.1f}%)")
           else:
-              print("No predictions collected -- check shard logs above.")
+              print("No predictions -- check shard logs.")
           PYEOF
 
       - name: Upload merged predictions
@@ -192,5 +256,5 @@ jobs:
           SWEBENCH_API_KEY: ${{ secrets.SWEBENCH_API_KEY }}
         run: |
           echo "sb-cli submit --predictions predictions.json --split verified"
-          # Uncomment when SWEBENCH_API_KEY is set:
+          # Uncomment when ready:
           # sb-cli submit --predictions predictions.json --split verified
