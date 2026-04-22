@@ -1086,13 +1086,15 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
                 continue
 
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
-                    _fut = _ex.submit(agent.solve_task, task, repo_dir, already_analyzed)
-                    try:
-                        patch = _fut.result(timeout=TASK_TIMEOUT)
-                    except concurrent.futures.TimeoutError:
-                        print("  [timeout] Task exceeded {}s — submitting empty patch".format(TASK_TIMEOUT))
-                        patch = ""
+                _ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _fut = _ex.submit(agent.solve_task, task, repo_dir, already_analyzed)
+                try:
+                    patch = _fut.result(timeout=TASK_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    print("  [timeout] Task exceeded {}s — submitting empty patch".format(TASK_TIMEOUT))
+                    patch = ""
+                finally:
+                    _ex.shutdown(wait=False)  # don't block — let background thread die on its own
             except Exception as e:
                 print("  [error] Unhandled: {}".format(e))
                 patch = ""
