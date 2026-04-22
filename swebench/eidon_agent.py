@@ -426,7 +426,10 @@ class EidonAgent:
             if r.returncode != 0:
                 print("  [git] Clone failed: {}".format(r.stderr[:300]))
                 return False
-            return self.checkout_commit(repo_dir, base_commit)
+            if not self.checkout_commit(repo_dir, base_commit):
+                return False
+            self._copy_preloaded_db(repo, repo_dir)
+            return True
         except subprocess.TimeoutExpired:
             print("  [git] Clone timed out")
             return False
@@ -469,6 +472,10 @@ class EidonAgent:
 
     def encode_repo(self, repo_path: str) -> bool:
         """Run `eidon analyze` on the repo. Returns True if .eidon/db was produced."""
+        db_path = Path(repo_path) / ".eidon" / "eidon.db"
+        if db_path.exists():
+            print("  [eidon] DB already present — skipping analyze")
+            return True
         print("  [eidon] Analyzing {}...".format(repo_path))
         start = time.time()
 
@@ -511,6 +518,26 @@ class EidonAgent:
         # Check DB exists — MCP needs it
         db_path = Path(repo_path) / ".eidon" / "eidon.db"
         return db_path.exists()
+
+    def _copy_preloaded_db(self, repo: str, repo_dir: str):
+        """
+        If EIDON_PRELOAD_DIR is set (by the pre-analyze workflow job),
+        copy the pre-analyzed eidon.db into the freshly cloned repo.
+        This means encode_repo() will be skipped entirely for this repo.
+        """
+        preload_dir = os.environ.get("EIDON_PRELOAD_DIR", "")
+        if not preload_dir:
+            return
+        key = repo.replace("/", "__")
+        src = os.path.join(preload_dir, "eidon-db-" + key, "eidon.db")
+        if not os.path.exists(src):
+            print("  [eidon] No preloaded DB for {} at {}".format(repo, src))
+            return
+        dst_dir = os.path.join(repo_dir, ".eidon")
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy2(src, os.path.join(dst_dir, "eidon.db"))
+        size_mb = os.path.getsize(src) / 1_000_000
+        print("  [eidon] Preloaded DB for {} ({:.1f} MB)".format(repo, size_mb))
 
     # ── Stage 2: Query Eidon MCP ──────────────────────────────────────────────
 
@@ -1038,7 +1065,8 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
                 # Reset any leftover changes from the previous task first.
                 subprocess.run(["git", "reset", "--hard"], cwd=repo_dir,
                                capture_output=True, timeout=30)
-                subprocess.run(["git", "clean", "-fd"], cwd=repo_dir,
+                # -e .eidon: preserve the Eidon DB across task resets
+                subprocess.run(["git", "clean", "-fd", "-e", ".eidon"], cwd=repo_dir,
                                capture_output=True, timeout=30)
                 cloned = agent.checkout_commit(repo_dir, task["base_commit"])
                 if cloned:
