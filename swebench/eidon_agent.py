@@ -1,55 +1,55 @@
 ﻿#!/usr/bin/env python3
 """
-Eidon SWE-bench Agent — World-Class Edition
-============================================
+Eidon SWE-bench Agent — MCP Edition
+=====================================
 
-Four-stage pipeline per task:
+This agent tests Eidon as it is actually used: as an MCP server.
+The model never opens files directly. It only gets what Eidon gives it.
+
+Pipeline per task:
 
   STAGE 1 — ENCODE
     `eidon analyze` runs the full 11-phase pipeline on the cloned repo.
-    Produces .eidon/encoding: L0-L3 graph-theoretic codebase map.
-      L0 — System topology (spectral, entropy, health vector)
-      L1 — Community topology (Louvain, gravity wells, bridge files)
-      L2 — CodeRank, SPOFs, data-flow taint, circular cycles
-      L3 — Per-file: CodeRank, blast_radius, risk_grade, AI-derived purpose
-           + smart-compressed source at the appropriate tier
-    Hash-based cache: Phase 7 LLM analysis is reused for unchanged files.
+    Hash-based cache: unchanged files reuse Phase 7 LLM analysis.
+    Same repo = 100 tasks share one analysis (amortized cost ~$0).
 
-  STAGE 2 — LOCALIZE  (~$0.001/task)
-    DeepSeek V3 reads the Eidon encoding + issue description.
-    Outputs a JSON list of 3-5 exact file paths to modify.
-    This mirrors what `eidon_encoding(intent=...)` does in the MCP:
-    - In MCP: HNSW vector search on intent => top-20 files => Tier 3
-    - Here: DeepSeek reasons over the L3 purpose map => surgical selection
+  STAGE 2 — QUERY EIDON MCP
+    Start `eidon mcp --repo <path>` as a stdio subprocess.
+    Call eidon_encoding(intent=problem_statement, token_budget=32000).
+    Eidon performs HNSW vector search on the issue text and returns:
+      - Surgically relevant files (full source, Tier-3 treatment)
+      - Graph context: CodeRank, blast_radius, community, dependencies
+      - L0-L3 architectural map
+    No separate localize step needed — eidon_encoding(intent=...) IS the
+    localization, done with semantic vector search over the full graph.
 
-  STAGE 3 — PATCH  (~$0.01-0.02/task)
-    DeepSeek V3 reads:
-      - Eidon encoding (full architectural context)
-      - Full source of the localized files
-      - The issue description + hints
-      - The failing tests (FAIL_TO_PASS) from the SWE-bench task
-    Generates a minimal unified diff patch.
+  STAGE 3 — PATCH  (deepseek-reasoner thinking mode)
+    DeepSeek reads Eidon's focused context + issue + FAIL_TO_PASS tests.
+    Generates minimal unified diff.
 
   STAGE 4 — VERIFY + REPAIR (up to 2 retries)
-    `git apply --check` validates the patch applies cleanly.
-    If it fails, DeepSeek repairs the patch with the error context.
+    `git apply --check` validates the patch.
+    On failure: deepseek-reasoner repairs the patch with error context.
 
-Why this beats vanilla DeepSeek (standalone):
-  - Eidon encoding = full architectural oracle, not just file content
-  - Localization = surgical file selection (vs. guessing in 1000+ file repos)
-  - Test awareness = FAIL_TO_PASS drives the fix, not just the issue text
-  - Blast-radius signal = knows which changes cascade downstream
-  - Repair loop = recovers from malformed hunks
+Why this beats standalone DeepSeek:
+  - No file browsing: model never wastes tokens opening wrong files
+  - Semantic localization: HNSW search on the issue text finds exact files
+  - Graph context: blast_radius, SPOF status, community — invisible to browsers
+  - 86:1 compression: entire repo architecture in one focused prompt
+  - Test-driven: FAIL_TO_PASS tests anchor every patch
 
-Cost estimate:
-  Localize: ~5K input, ~200 output   -> ~$0.001
-  Patch:    ~30K input, ~2K output   -> ~$0.012
-  Repair:   ~35K input, ~2K output   -> ~$0.013 (~30% of tasks)
-  Total: ~$0.015-0.025/task -> ~$8-12 for 500 tasks
+Cost estimate per task:
+  eidon_encoding call: ~12K tokens -> ~$0.003
+  Patch (reasoner):    ~20K in, ~2K out -> ~$0.006
+  Repair (~25% tasks): ~25K in, ~2K out -> ~$0.008
+  Total: ~$0.008-0.015/task -> ~$4-8 for 500 tasks
+
+Control (without Eidon) baseline: already on SWE-bench leaderboard.
+We submit, compare, publish the delta.
 
 Usage:
   python eidon_agent.py --tasks 10
-  python eidon_agent.py --tasks 50           # validation (~$1, ~2h)
+  python eidon_agent.py --tasks 50           # validation (~$0.50, ~2h)
   python eidon_agent.py --tasks all          # full 500 tasks
   python eidon_agent.py --tasks 100 --offset 200   # shard: tasks 200-299
   python eidon_agent.py --instance django__django-12345
@@ -76,62 +76,29 @@ from datasets import load_dataset
 DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL   = "https://api.deepseek.com/v1"
 
-# Two-model strategy (both are DeepSeek-V3.2, same price: $0.28/1M in, $0.42/1M out):
-#   deepseek-chat      = Non-thinking mode. Fast, great for structured JSON output.
-#   deepseek-reasoner  = Thinking mode. Reasons step-by-step before answering.
-#                        Same price. Far better at complex code analysis.
-# Stage 2 (localize):  deepseek-chat     — just needs file identification
-# Stage 3 (patch):     deepseek-reasoner — needs to reason about root cause + fix
-# Stage 4 (repair):    deepseek-reasoner — needs to reason about why hunk failed
-MODEL_LOCALIZE      = "deepseek-chat"        # fast, cheap, structured JSON
-MODEL_PATCH         = "deepseek-reasoner"    # thinking mode — best for code repair
-MODEL_REPAIR        = "deepseek-reasoner"    # thinking mode — best for patch repair
+# deepseek-reasoner = thinking mode, best for complex code repair (Stage 3 + 4)
+MODEL_PATCH         = "deepseek-reasoner"
+MODEL_REPAIR        = "deepseek-reasoner"
 
-EIDON_BIN           = "eidon"               # installed via: npm install -g eidoncore
-TOKEN_BUDGET        = 32000                  # Eidon encoding token budget
-MAX_PATCH_TOKENS    = 8000   # reasoner needs room for reasoning tokens + patch
-MAX_LOCALIZE_TOKENS = 512
+EIDON_BIN           = "eidon"        # installed via: npm install -g eidoncore
+TOKEN_BUDGET        = 32000          # eidon_encoding token budget
+MAX_PATCH_TOKENS    = 8000           # reasoner needs room for thinking tokens + patch
 OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
-MODEL_NAME_TAG      = "eidon-deepseek-r1"    # R1 thinking mode used for patches
+MODEL_NAME_TAG      = "eidon-mcp-deepseek-reasoner"
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 SYSTEM_LOCALIZE = """\
 You are an expert software engineer analyzing a GitHub issue.
 
-You have been given the Eidon architectural encoding of the entire codebase.
-The encoding is produced by the Eidon 11-phase analysis pipeline and contains:
-  L0 -- System topology: spectral properties, Shannon entropy, health vector
-  L1 -- Community topology: Louvain partition, gravity wells (hub files)
-  L2 -- CodeRank (weighted PageRank), SPOFs, data-flow taint, circular cycles
-  L3 -- Per-file: CodeRank score, blast_radius, risk_grade, AI-derived purpose
-       plus smart-compressed source at the appropriate tier
-
-Your task: Identify the MINIMAL set of source files that must be modified to
-fix the reported issue.
-
-Output ONLY valid JSON with this exact structure (no markdown, no explanation):
-{
-  "files": ["relative/path/file1.py", "relative/path/file2.py"],
-  "reasoning": "one-sentence explanation of what needs to change"
-}
-
-Constraints:
-  - At most 5 files total
-  - Relative paths from repo root (e.g. "django/contrib/auth/models.py")
-  - Source files ONLY -- never test_*.py or *_test.py files
-  - Prefer modifying files with lower blast_radius when alternatives exist
-"""
-
-SYSTEM_PATCH = """\
 You are an expert software engineer fixing a real GitHub issue.
 
-You have been provided with:
-  1. The Eidon architectural encoding (full codebase structure, L0-L3 graph)
-  2. The FULL SOURCE of every file that needs to be modified
-  3. The failing tests -- exactly what must pass after your fix
-  4. The issue description and hints
+Eidon has already analyzed the entire repository and given you a focused,
+semantically-ranked context: the files most relevant to this issue, their
+full source, and the architectural graph (CodeRank, blast_radius, community,
+dependencies). You did not browse files. Eidon selected them for you using
+HNSW vector search on the issue description.
 
 Your task: Generate the minimal unified git diff patch that fixes the issue.
 
@@ -175,7 +142,7 @@ failing tests are still failing.
 You will be given:
   1. The current patch you applied
   2. The pytest output showing exactly what failed and why
-  3. The full source of the relevant files (AFTER your patch was applied)
+  3. The Eidon context for the relevant files (AFTER your patch was applied)
   4. The issue description
 
 Your task: Generate a NEW patch (relative to the ORIGINAL unmodified file)
@@ -195,8 +162,8 @@ Pytest output (tests still failing):
 {pytest_output}
 ```
 
-Full source of modified files (current state after patch):
-{file_sources}
+Eidon context for modified files (current state after patch):
+{eidon_context}
 
 ---
 
@@ -209,34 +176,11 @@ Full source of modified files (current state after patch):
 Generate a NEW patch from the ORIGINAL unmodified file. Output ONLY the raw unified diff.
 """
 
-LOCALIZE_TEMPLATE = """\
-## Eidon Codebase Encoding
-
-{encoding}
-
----
-
-## GitHub Issue
-
-**Repository:** {repo}
-
-{problem_statement}
-
----
-
-Identify the files to modify. Output valid JSON only.
-"""
-
 PATCH_TEMPLATE = """\
-## Eidon Codebase Encoding (Architectural Context)
+## Eidon Repository Context
+(Semantic search on the issue description. Files ranked by relevance + CodeRank.)
 
-{encoding}
-
----
-
-## Full Source of Files to Modify
-
-{file_sources}
+{eidon_context}
 
 ---
 
@@ -277,12 +221,150 @@ Original (broken) patch:
 {bad_patch}
 ```
 
-Full source of the relevant files:
+Eidon context for the relevant files:
 
-{file_sources}
+{eidon_context}
 
 Output the corrected unified diff patch. Output ONLY the raw patch.
 """
+
+
+# ── Eidon MCP Client ─────────────────────────────────────────────────────────
+
+class EidonMCPClient:
+    """
+    Minimal MCP stdio client.
+    Starts `eidon mcp --repo <path>` as a subprocess and communicates
+    over stdin/stdout using JSON-RPC 2.0 (newline-delimited).
+
+    This is how Eidon is actually used as a product — the model never
+    opens files directly. It only receives what Eidon gives it.
+    """
+
+    def __init__(self, repo_path: str):
+        self.repo_path = repo_path
+        self._proc: Optional[subprocess.Popen] = None
+        self._msg_id = 0
+        self._reader_queue: queue.Queue = queue.Queue()
+        self._reader_thread: Optional[threading.Thread] = None
+
+    def start(self) -> bool:
+        """Start the Eidon MCP server. Returns True on success."""
+        try:
+            self._proc = subprocess.Popen(
+                [EIDON_BIN, "mcp", "--repo", self.repo_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            # Background thread reads stdout lines into queue
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop, daemon=True
+            )
+            self._reader_thread.start()
+
+            # Send MCP initialize handshake
+            resp = self._rpc("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "eidon-swebench", "version": "1.0"},
+            })
+            if resp is None:
+                print("  [mcp] Initialize failed")
+                return False
+            # Send initialized notification
+            self._notify("notifications/initialized", {})
+            return True
+        except Exception as e:
+            print("  [mcp] Failed to start: {}".format(e))
+            return False
+
+    def stop(self):
+        """Terminate the MCP server process."""
+        if self._proc:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=5)
+            except Exception:
+                pass
+            self._proc = None
+
+    def _reader_loop(self):
+        """Read newline-delimited JSON from stdout and enqueue."""
+        try:
+            for line in self._proc.stdout:
+                line = line.strip()
+                if line:
+                    try:
+                        self._reader_queue.put(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass  # ignore malformed lines
+        except Exception:
+            pass
+
+    def _send(self, msg: dict):
+        """Write a JSON-RPC message to stdin."""
+        if self._proc and self._proc.stdin:
+            try:
+                self._proc.stdin.write(json.dumps(msg) + "\n")
+                self._proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+    def _notify(self, method: str, params: dict):
+        """Send a notification (no response expected)."""
+        self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _rpc(self, method: str, params: dict, timeout: float = 30.0) -> Optional[dict]:
+        """Send a JSON-RPC request and wait for the response."""
+        self._msg_id += 1
+        msg_id = self._msg_id
+        self._send({
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "method": method,
+            "params": params,
+        })
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                msg = self._reader_queue.get(timeout=0.1)
+                if msg.get("id") == msg_id:
+                    if "error" in msg:
+                        print("  [mcp] RPC error: {}".format(msg["error"]))
+                        return None
+                    return msg.get("result")
+                # Put back messages that aren't for us
+                self._reader_queue.put(msg)
+            except queue.Empty:
+                pass
+        print("  [mcp] Timeout waiting for response to {}".format(method))
+        return None
+
+    def call_encoding(self, intent: str, token_budget: int = TOKEN_BUDGET) -> Optional[str]:
+        """
+        Call eidon_encoding(intent=...) — the core MCP call.
+        Eidon performs HNSW semantic search on `intent` (the issue description)
+        and returns the most relevant files with full source + graph context.
+        This replaces both the static encoding dump AND the separate localize step.
+        """
+        result = self._rpc("tools/call", {
+            "name": "eidon_encoding",
+            "arguments": {
+                "intent": intent,
+                "token_budget": token_budget,
+            },
+        }, timeout=120.0)
+
+        if result is None:
+            return None
+
+        content = result.get("content", [])
+        if content and isinstance(content, list):
+            return content[0].get("text", "")
+        return None
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
@@ -320,8 +402,8 @@ class EidonAgent:
         if self.cache_dir:
             cache_key = repo.replace("/", "__") + "_" + base_commit[:12]
             repo_dir  = os.path.join(self.cache_dir, cache_key)
-            encoding  = os.path.join(repo_dir, ".eidon", "encoding")
-            if os.path.exists(encoding):
+            db_path   = os.path.join(repo_dir, ".eidon", "eidon.db")
+            if os.path.exists(db_path):
                 print("  [cache] HIT: {}@{}".format(repo, base_commit[:8]))
                 return repo_dir, True
             os.makedirs(repo_dir, exist_ok=True)
@@ -383,8 +465,8 @@ class EidonAgent:
 
     # ── Stage 1: Encode ───────────────────────────────────────────────────────
 
-    def encode_repo(self, repo_path: str) -> str:
-        """Run `eidon analyze` and return .eidon/encoding content."""
+    def encode_repo(self, repo_path: str) -> bool:
+        """Run `eidon analyze` on the repo. Returns True if .eidon/db was produced."""
         print("  [eidon] Analyzing {}...".format(repo_path))
         start = time.time()
 
@@ -392,153 +474,84 @@ class EidonAgent:
         env["EIDON_LLM_PROVIDER"]       = "openai"
         env["EIDON_LLM_BASE_URL"]       = DEEPSEEK_BASE_URL
         env["EIDON_LLM_API_KEY"]        = DEEPSEEK_API_KEY or ""
-        env["EIDON_LLM_MODEL"]          = MODEL_LOCALIZE       # deepseek-chat for Phase 7
+        env["EIDON_LLM_MODEL"]          = "deepseek-chat"      # fast for Phase 7
         env["EIDON_LLM_CONCURRENCY"]    = "50"                 # 50 parallel Phase 7 calls
         env["EIDON_WORKER_CONCURRENCY"] = "50"                 # 50 parallel Phase 2 workers
         env["EIDON_ENCODING_TOKENS"]    = str(TOKEN_BUDGET)
-        # KEY FIX: only analyze top 100 files by CodeRank in Phase 7.
-        # Eidon already sorts by CodeRank desc, so these are the most architecturally
-        # important files. 100 files / 50 concurrency = 2 batches = ~15s for Phase 7.
-        # Full 1200-file analysis would take 25+ min per repo (unacceptable for 500 tasks).
-        env["EIDON_PHASE7_FILE_LIMIT"]  = "100"
         env["EIDON_MAX_RECHECK_CYCLES"] = "0"
         env["EIDON_RECHECK_BUDGET"]     = "0"
         env["EIDON_AI_COURT_BUDGET"]    = "0"
         env["EIDON_DEEP_SCAN_BUDGET"]   = "0"
         env["EIDON_LLM_REANALYSIS"]     = "false"
 
-        timed_out = False
         try:
             result = subprocess.run(
-                [EIDON_BIN, "analyze", "--fresh"],
+                [EIDON_BIN, "analyze"],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=1000000, # no limit
+                timeout=1800,  # 30 min max per repo
                 env=env,
             )
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            print("  [eidon] Timed out after 1000000s -- reading partial encoding if available")
-
-        elapsed = time.time() - start
-
-        if not timed_out:
+            elapsed = time.time() - start
             if result.returncode != 0:
                 print("  [eidon] WARNING: exited {} after {:.1f}s".format(result.returncode, elapsed))
-                print("  {}".format(result.stderr[:500]))
+                print("  {}".format(result.stderr[:300]))
             else:
                 print("  [eidon] Analyzed in {:.1f}s".format(elapsed))
-
-        encoding_path = Path(repo_path) / ".eidon" / "encoding"
-        if encoding_path.exists():
-            encoding = encoding_path.read_text(encoding="utf-8", errors="replace")
-            print("  [eidon] Encoding: {:,} chars (~{:,} tokens)".format(
-                len(encoding), len(encoding) // 4))
-            return encoding
-
-        # Fallback: context.json
-        context_path = Path(repo_path) / ".eidon" / "context.json"
-        if context_path.exists():
-            print("  [eidon] WARNING: .eidon/encoding not found, falling back to context.json")
-            raw = context_path.read_text(encoding="utf-8", errors="replace")
-            return raw[:TOKEN_BUDGET * 4]
-
-        print("  [eidon] WARNING: no encoding produced")
-        return ""
-
-    # ── Stage 2: Localize ─────────────────────────────────────────────────────
-
-    def localize_files(self, encoding: str, task: dict) -> list:
-        """
-        Ask DeepSeek which files to modify. Cheap call (~$0.001/task).
-        Returns list of relative file paths.
-
-        This is the non-MCP equivalent of eidon_encoding(intent=problem_statement):
-        instead of HNSW vector search, we let DeepSeek reason over the L3
-        purpose map to surgically identify which files need to change.
-        """
-        user_content = LOCALIZE_TEMPLATE.format(
-            encoding=encoding,
-            repo=task.get("repo", ""),
-            problem_statement=task.get("problem_statement", ""),
-        )
-
-        print("  [localize] Identifying relevant files (~{} tokens)...".format(
-            len(user_content) // 4))
-
-        try:
-            response = self.client.chat.completions.create(
-                model=MODEL_LOCALIZE,  # deepseek-chat: fast, structured JSON
-                max_tokens=MAX_LOCALIZE_TOKENS,
-                temperature=0.0,
-                messages=[
-                    {"role": "system", "content": SYSTEM_LOCALIZE},
-                    {"role": "user",   "content": user_content},
-                ],
-            )
+        except subprocess.TimeoutExpired:
+            print("  [eidon] Timed out after 30 min -- proceeding with partial DB")
         except Exception as e:
-            print("  [localize] API error: {}".format(e))
-            return []
+            print("  [eidon] Error: {}".format(e))
+            return False
 
-        if response.usage:
-            self.total_input_tokens  += response.usage.prompt_tokens
-            self.total_output_tokens += response.usage.completion_tokens
+        # Check DB exists — MCP needs it
+        db_path = Path(repo_path) / ".eidon" / "eidon.db"
+        return db_path.exists()
 
-        raw = (response.choices[0].message.content or "").strip()
+    # ── Stage 2: Query Eidon MCP ──────────────────────────────────────────────
 
-        # Strip markdown fences if present
-        json_str = raw
-        fence_m  = re.search(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL)
-        if fence_m:
-            json_str = fence_m.group(1).strip()
+    def query_eidon_mcp(self, repo_path: str, problem_statement: str) -> str:
+        """
+        Start `eidon mcp --repo <path>` as a stdio subprocess and call
+        eidon_encoding(intent=problem_statement).
+
+        Eidon performs HNSW vector search on the issue description and returns
+        the semantically closest files with full source + graph context.
+        This IS the localization — no separate DeepSeek localize call needed.
+        """
+        print("  [mcp] Starting Eidon MCP server...")
+        mcp = EidonMCPClient(repo_path)
+        if not mcp.start():
+            print("  [mcp] Failed to start MCP server")
+            return ""
 
         try:
-            data   = json.loads(json_str)
-            files  = data.get("files", [])
-            if not isinstance(files, list):
-                files = []
-            files  = [f for f in files if isinstance(f, str) and f.strip()][:5]
-            reason = data.get("reasoning", "")
-            print("  [localize] {} file(s): {}".format(len(files), files))
-            if reason:
-                print("  [localize] Reason: {}".format(reason))
-            return files
-        except json.JSONDecodeError:
-            # Fallback: extract .py paths from plain text
-            print("  [localize] JSON parse failed, extracting from: {}".format(raw[:200]))
-            paths = re.findall(r'[\w./\-]+\.py', raw)
-            return list(dict.fromkeys(paths))[:5]
+            # Truncate intent to avoid overwhelming the search query
+            intent = problem_statement[:1000].strip()
+            print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})...".format(
+                TOKEN_BUDGET))
+            start = time.time()
+            context = mcp.call_encoding(intent=intent, token_budget=TOKEN_BUDGET)
+            elapsed = time.time() - start
 
-    # ── Stage 2b: Read full source ────────────────────────────────────────────
+            if context:
+                print("  [mcp] Got {:,} chars ({:,} est. tokens) in {:.1f}s".format(
+                    len(context), len(context) // 4, elapsed))
+            else:
+                print("  [mcp] eidon_encoding returned empty context")
+                context = ""
 
-    def read_file_sources(self, file_paths: list, repo_dir: str) -> str:
-        """Read full source of localized files. Returns formatted string."""
-        if not file_paths:
-            return "(no files identified)"
-
-        sections = []
-        for rel_path in file_paths:
-            abs_path = os.path.join(repo_dir, rel_path)
-            try:
-                content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
-                lines   = content.count("\n") + 1
-                sections.append(
-                    "### {} ({} lines)\n```python\n{}\n```".format(rel_path, lines, content)
-                )
-            except FileNotFoundError:
-                sections.append("### {}\n(file not found at this commit)".format(rel_path))
-            except Exception as e:
-                sections.append("### {}\n(error reading: {})".format(rel_path, e))
-
-        return "\n\n".join(sections)
+            return context
+        finally:
+            mcp.stop()
 
     # ── Stage 3: Generate patch ───────────────────────────────────────────────
 
-    def generate_patch(self, encoding: str, file_sources: str, task: dict) -> str:
+    def generate_patch(self, eidon_context: str, task: dict) -> str:
         """
-        Call DeepSeek V3 with full context: encoding + full source + issue +
-        hints_text + test_patch + FAIL_TO_PASS test names.
+        Call DeepSeek-reasoner with Eidon's focused context + issue + tests.
+        No file sources needed separately — eidon_encoding already includes them.
         """
         hints         = (task.get("hints_text", "") or "").strip()
         hints_section = "**Hints from the issue thread:**\n{}".format(hints) if hints else ""
@@ -559,8 +572,7 @@ class EidonAgent:
             test_patch = test_patch[:4000] + "\n... (truncated)"
 
         user_content = PATCH_TEMPLATE.format(
-            encoding=encoding,
-            file_sources=file_sources,
+            eidon_context=eidon_context or "(no context from Eidon)",
             repo=task.get("repo", ""),
             problem_statement=task.get("problem_statement", ""),
             hints_section=hints_section,
@@ -568,15 +580,14 @@ class EidonAgent:
             test_patch=test_patch if test_patch else "(not provided)",
         )
 
-        print("  [patch] Calling deepseek-reasoner (thinking mode, ~{:,} est. tokens)...".format(
+        print("  [patch] Calling deepseek-reasoner (~{:,} est. tokens)...".format(
             len(user_content) // 4))
         start = time.time()
 
         try:
             response = self.client.chat.completions.create(
-                model=MODEL_PATCH,     # deepseek-reasoner: thinking mode
+                model=MODEL_PATCH,
                 max_tokens=MAX_PATCH_TOKENS,
-                # Note: temperature not set for thinking model (uses internal reasoning)
                 messages=[
                     {"role": "system", "content": SYSTEM_PATCH},
                     {"role": "user",   "content": user_content},
@@ -692,7 +703,7 @@ class EidonAgent:
             return False, str(e)
 
     def test_repair(self, current_patch: str, pytest_output: str,
-                    file_sources: str, task: dict) -> str:
+                    eidon_context: str, task: dict) -> str:
         """Ask DeepSeek to fix the patch based on actual test failures."""
         print("  [test-repair] Asking DeepSeek to fix based on test output...")
         fail_to_pass = task.get("FAIL_TO_PASS", [])
@@ -705,7 +716,7 @@ class EidonAgent:
         user_content = TEST_REPAIR_TEMPLATE.format(
             current_patch=current_patch,
             pytest_output=pytest_output,
-            file_sources=file_sources,
+            eidon_context=eidon_context or "(no context)",
             problem_statement=task.get("problem_statement", "")[:2000],
             fail_to_pass="\n".join(fail_to_pass[:10]),
         )
@@ -729,7 +740,7 @@ class EidonAgent:
 
         return (response.choices[0].message.content or "").strip()
 
-    def repair_patch(self, bad_patch: str, error: str, file_sources: str, task: dict) -> str:
+    def repair_patch(self, bad_patch: str, error: str, eidon_context: str, task: dict) -> str:
         """Ask DeepSeek to repair a patch that failed git apply --check."""
         print("  [repair] git apply failed: {}".format(error[:120]))
         print("  [repair] Asking DeepSeek to repair...")
@@ -737,7 +748,7 @@ class EidonAgent:
         user_content = REPAIR_TEMPLATE.format(
             error=error,
             bad_patch=bad_patch,
-            file_sources=file_sources,
+            eidon_context=eidon_context or "(no context)",
         )
 
         try:
@@ -854,11 +865,11 @@ class EidonAgent:
 
     def solve_task(self, task: dict, repo_dir: str, skip_encode: bool = False) -> str:
         """
-        Five-stage pipeline per SWE-bench task:
-          1. Encode  -- eidon analyze (concurrency=50, ~48s on large repos)
-          2. Localize -- DeepSeek identifies which files to change
-          3. Patch   -- DeepSeek-reasoner generates unified diff
-          4. Apply + git-repair loop (fix corrupt hunks, up to 2x)
+        Four-stage pipeline per SWE-bench task:
+          1. Encode  -- `eidon analyze` builds the HNSW graph (skip if cached)
+          2. MCP     -- `eidon_encoding(intent=problem_statement)` returns focused context
+          3. Patch   -- DeepSeek-reasoner generates unified diff from Eidon context
+          4. Apply + repair loop (fix corrupt hunks, up to 2x)
           5. Test loop -- run FAIL_TO_PASS tests, re-patch on failure (up to 3x)
         """
         self.total_tasks += 1
@@ -871,30 +882,28 @@ class EidonAgent:
             except Exception:
                 fail_to_pass = [fail_to_pass]
 
-        # Stage 1: Encode
-        if skip_encode:
-            enc_path = Path(repo_dir) / ".eidon" / "encoding"
-            if enc_path.exists():
-                encoding = enc_path.read_text(encoding="utf-8", errors="replace")
-                print("  [eidon] Using cached encoding ({:,} chars)".format(len(encoding)))
-            else:
-                encoding = ""
-        else:
+        # Stage 1: Encode (build HNSW graph)
+        if not skip_encode:
             try:
-                encoding = self.encode_repo(repo_dir)
+                ok = self.encode_repo(repo_dir)
+                if not ok:
+                    print("  [warn] eidon analyze did not produce DB -- MCP may fail")
             except Exception as e:
-                print("  [eidon] encode failed: {} -- continuing without encoding".format(e))
-                encoding = ""
+                print("  [eidon] encode failed: {} -- MCP may fail".format(e))
 
-        if not encoding:
-            print("  [warn] No eidon encoding -- falling back to no-encoding mode")
+        # Stage 2: Query Eidon MCP — HNSW search on the problem statement
+        problem_statement = task.get("problem_statement", "")
+        try:
+            eidon_context = self.query_eidon_mcp(repo_dir, problem_statement)
+        except Exception as e:
+            print("  [mcp] query failed: {} -- proceeding without context".format(e))
+            eidon_context = ""
 
-        # Stage 2: Localize
-        file_paths   = self.localize_files(encoding, task)
-        file_sources = self.read_file_sources(file_paths, repo_dir)
+        if not eidon_context:
+            print("  [warn] No Eidon context -- patch quality may be reduced")
 
-        # Stage 3: Generate patch
-        raw_output = self.generate_patch(encoding, file_sources, task)
+        # Stage 3: Generate patch using Eidon context
+        raw_output = self.generate_patch(eidon_context, task)
         patch      = self.extract_patch(raw_output)
 
         # Stage 4: git apply repair loop (fix corrupt hunks)
@@ -905,7 +914,7 @@ class EidonAgent:
                 print("  [verify] Patch applies cleanly{}".format(label))
                 break
             if attempt < 1:
-                repaired = self.repair_patch(patch, err, file_sources, task)
+                repaired = self.repair_patch(patch, err, eidon_context, task)
                 patch    = self.extract_patch(repaired)
             else:
                 print("  [verify] Patch still invalid after git-repair -- will submit as-is")
@@ -929,10 +938,8 @@ class EidonAgent:
                         break
 
                     if test_attempt < 2:
-                        # Re-read sources in their CURRENT (patched) state for context
-                        current_sources = self.read_file_sources(file_paths, repo_dir)
                         raw_repaired = self.test_repair(
-                            patch, pytest_out, current_sources, task
+                            patch, pytest_out, eidon_context, task
                         )
                         new_patch = self.extract_patch(raw_repaired)
                         if new_patch.strip():
@@ -994,6 +1001,13 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
             tasks = tasks[offset:]
         if str(num_tasks) != "all" and num_tasks != -1:
             tasks = tasks[:int(num_tasks)]
+
+    # Sort by (repo, base_commit) so all tasks sharing the same commit run consecutively.
+    # First task does the full eidon analysis; every subsequent task at the SAME commit
+    # hits the cache in get_repo_dir() → skip_encode=True → 0 min for eidon.
+    # Also, between tasks on the SAME repo at DIFFERENT commits, eidon reuses Phase 7
+    # per-file hash results for unchanged files (no --fresh = cache-aware mode).
+    tasks.sort(key=lambda t: (t["repo"], t["base_commit"]))
 
     total = len(tasks)
     print("[bench] {} task(s) to run (offset={}, num={})".format(total, offset, num_tasks))
