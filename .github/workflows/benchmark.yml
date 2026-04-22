@@ -10,7 +10,7 @@ on:
       num_jobs:
         description: "Parallel shard jobs"
         required: false
-        default: "5"
+        default: "15"
 
 env:
   DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -172,6 +172,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
+          EIDON_TASK_TIMEOUT: "720"
           PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p /tmp/eidon-cache
