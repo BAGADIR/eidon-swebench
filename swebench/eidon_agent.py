@@ -66,6 +66,7 @@ import argparse
 import time
 import re
 import queue
+import concurrent.futures
 from pathlib import Path
 from typing import Optional
 
@@ -84,6 +85,7 @@ MODEL_REPAIR        = "deepseek-reasoner"
 EIDON_BIN           = "eidon"        # installed via: npm install -g eidoncore
 TOKEN_BUDGET        = 32000          # eidon_encoding token budget
 MAX_PATCH_TOKENS    = 8000           # reasoner needs room for thinking tokens + patch
+TASK_TIMEOUT        = int(os.environ.get("EIDON_TASK_TIMEOUT", "720"))  # 12 min per task
 OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
 MODEL_NAME_TAG      = "eidon-mcp-deepseek-reasoner"
@@ -1083,7 +1085,13 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
                 continue
 
             try:
-                patch = agent.solve_task(task, repo_dir, skip_encode=already_analyzed)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                    _fut = _ex.submit(agent.solve_task, task, repo_dir, already_analyzed)
+                    try:
+                        patch = _fut.result(timeout=TASK_TIMEOUT)
+                    except concurrent.futures.TimeoutError:
+                        print("  [timeout] Task exceeded {}s — submitting empty patch".format(TASK_TIMEOUT))
+                        patch = ""
             except Exception as e:
                 print("  [error] Unhandled: {}".format(e))
                 patch = ""
