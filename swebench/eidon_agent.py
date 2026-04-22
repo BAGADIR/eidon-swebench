@@ -65,6 +65,7 @@ import shutil
 import argparse
 import time
 import re
+import queue
 from pathlib import Path
 from typing import Optional
 
@@ -89,9 +90,7 @@ MODEL_NAME_TAG      = "eidon-mcp-deepseek-reasoner"
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-SYSTEM_LOCALIZE = """\
-You are an expert software engineer analyzing a GitHub issue.
-
+SYSTEM_PATCH = """\
 You are an expert software engineer fixing a real GitHub issue.
 
 Eidon has already analyzed the entire repository and given you a focused,
