@@ -1,0 +1,30 @@
+name: api-test
+on: [workflow_dispatch]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test gemini-2.0-flash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          curl -sf -X POST \
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
+            -H "Authorization: Bearer $GEMINI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gemini-2.0-flash","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('MODEL OK:', d['choices'][0]['message']['content'])"
+          echo "--- testing gemini-2.5-flash ---"
+          curl -sf -X POST \
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
+            -H "Authorization: Bearer $GEMINI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gemini-2.5-flash-preview-05-20","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('2.5-FLASH OK:', d['choices'][0]['message']['content'])" || echo "2.5-flash FAILED"
+          echo "--- testing gemini-2.5-pro ---"
+          curl -sf -X POST \
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
+            -H "Authorization: Bearer $GEMINI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gemini-2.5-pro-preview-05-06","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('2.5-PRO OK:', d['choices'][0]['message']['content'])" || echo "2.5-pro FAILED"
