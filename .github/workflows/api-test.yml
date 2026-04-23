@@ -24,5 +24,6 @@ try:
   elif 'error' in d: print('ERR:', d['error'].get('message','?')[:120])
   else: print('RAW:', raw[:200])
 except: print('RAW:', raw[:200])
-"
+" || true
           done
+          exit 0
