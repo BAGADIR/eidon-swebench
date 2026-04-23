@@ -667,13 +667,37 @@ class EidonAgent:
 
     # ── Stage 4: Verify + repair ──────────────────────────────────────────────
 
+    def _remap_patch_paths(self, patch: str, repo_dir: str) -> str:
+        """If patch references non-existent paths, remap them by basename search."""
+        if not patch.strip():
+            return patch
+        repo_path = Path(repo_dir)
+        lines = patch.split("\n")
+        out = []
+        for line in lines:
+            if line.startswith("--- a/") or line.startswith("+++ b/"):
+                prefix = line[:6]
+                fpath  = line[6:]
+                full   = repo_path / fpath
+                if not full.exists():
+                    basename = Path(fpath).name
+                    matches  = list(repo_path.rglob(basename))
+                    # Filter out .git dir
+                    matches  = [m for m in matches if ".git" not in m.parts]
+                    if len(matches) == 1:
+                        rel = matches[0].relative_to(repo_path).as_posix()
+                        print("  [remap] {} -> {}".format(fpath, rel))
+                        line = prefix + rel
+            out.append(line)
+        return "\n".join(out)
+
     def verify_patch(self, patch: str, repo_dir: str) -> tuple:
         """Run `git apply --check`. Returns (ok, error_message)."""
         if not patch.strip():
             return False, "empty patch"
         try:
             result = subprocess.run(
-                ["git", "apply", "--check", "--recount", "--ignore-whitespace", "-"],
+                ["git", "apply", "--check", "--recount", "--ignore-whitespace", "-C0", "-"],
                 input=patch, cwd=repo_dir,
                 capture_output=True, text=True, timeout=30,
             )
@@ -687,7 +711,7 @@ class EidonAgent:
         """Apply patch to repo. Returns True on success."""
         try:
             result = subprocess.run(
-                ["git", "apply", "--recount", "--ignore-whitespace", "-"],
+                ["git", "apply", "--recount", "--ignore-whitespace", "-C0", "-"],
                 input=patch, cwd=repo_dir,
                 capture_output=True, text=True, timeout=30,
             )
@@ -865,6 +889,9 @@ class EidonAgent:
             print("  [warn] Could not extract a valid patch from model output (raw[:400]: {})".format(repr(s[:400])))
             return ""
 
+        # Strip git format-patch email footer ("-- \n2.45.2\n" etc.)
+        extracted = re.sub(r'\n-- \n[0-9]+\.[0-9]+.*$', '', extracted, flags=re.DOTALL)
+
         # Ensure trailing newline (git apply requires it)
         if not extracted.endswith("\n"):
             extracted += "\n"
@@ -981,6 +1008,10 @@ class EidonAgent:
         # Stage 4: git apply repair loop (fix corrupt hunks)
         JUNK_FILES = {".git_archival.txt", ".codecov.yml", ".gitignore",
                       ".travis.yml", "setup.cfg", "tox.ini", ".editorconfig"}
+
+        # Remap wrong file paths: if model used a non-existent path, find the real one by basename
+        patch = self._remap_patch_paths(patch, repo_dir)
+
         for attempt in range(2):
             ok, err = self.verify_patch(patch, repo_dir)
             if ok:
