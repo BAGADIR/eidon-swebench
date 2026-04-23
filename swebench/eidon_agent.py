@@ -724,6 +724,137 @@ class EidonAgent:
             out.append(line)
         return "\n".join(out)
 
+    def _fix_hunk_line_numbers(self, patch: str, repo_dir: str) -> str:
+        """
+        Correct @@ line numbers by searching for each hunk's context/removed lines
+        in the actual checked-out file. This fixes the commit-skew problem where
+        Eidon's DB was built on a newer commit than SWE-bench's base_commit.
+        """
+        if not patch or not repo_dir:
+            return patch
+
+        file_cache: dict = {}
+
+        def get_file_lines(rel_path):
+            if rel_path not in file_cache:
+                fp = Path(repo_dir) / rel_path
+                if fp.exists():
+                    try:
+                        file_cache[rel_path] = fp.read_text(errors='replace').splitlines()
+                    except Exception:
+                        file_cache[rel_path] = []
+                else:
+                    file_cache[rel_path] = []
+            return file_cache[rel_path]
+
+        def find_block(search_lines, file_lines, hint_line=0):
+            """Return 0-based index of search_lines in file_lines, or None."""
+            # Filter blank-only lines at edges
+            trimmed = [l.rstrip() for l in search_lines]
+            while trimmed and not trimmed[0].strip():
+                trimmed = trimmed[1:]
+            while trimmed and not trimmed[-1].strip():
+                trimmed = trimmed[:-1]
+            if not trimmed:
+                return None
+            n = len(trimmed)
+            file_stripped = [l.rstrip() for l in file_lines]
+            matches = []
+            for i in range(len(file_stripped) - n + 1):
+                if file_stripped[i:i+n] == trimmed:
+                    matches.append(i)
+            if not matches:
+                # Retry with leading-whitespace normalised (indent drift)
+                norm = [l.strip() for l in trimmed]
+                norm_file = [l.strip() for l in file_stripped]
+                for i in range(len(norm_file) - n + 1):
+                    if norm_file[i:i+n] == norm:
+                        matches.append(i)
+            if not matches:
+                return None
+            if len(matches) == 1:
+                return matches[0]
+            # Disambiguate: pick closest to the hint
+            return min(matches, key=lambda x: abs(x - hint_line))
+
+        out_lines = []
+        current_file = ""
+        added_before = 0   # cumulative (+lines - -lines) from previous hunks
+        i = 0
+        patch_lines = patch.splitlines()
+
+        while i < len(patch_lines):
+            line = patch_lines[i]
+
+            if line.startswith('--- a/'):
+                current_file = line[6:].strip()
+                added_before = 0
+                out_lines.append(line)
+                i += 1
+                continue
+
+            if line.startswith('+++ b/'):
+                out_lines.append(line)
+                i += 1
+                continue
+
+            if line.startswith('@@ ') and current_file:
+                hunk_header = line
+                i += 1
+                # Collect hunk body
+                hunk_body = []
+                while i < len(patch_lines):
+                    l = patch_lines[i]
+                    if l.startswith('@@ ') or l.startswith('--- ') or l.startswith('diff '):
+                        break
+                    hunk_body.append(l)
+                    i += 1
+
+                # Extract search lines (context + removed lines)
+                search_lines = []
+                for bl in hunk_body:
+                    if bl.startswith(' ') or bl.startswith('-'):
+                        search_lines.append(bl[1:])
+
+                # Parse existing header for hint
+                m = re.match(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)', hunk_header)
+                if m and search_lines and current_file:
+                    hint = int(m.group(1)) - 1  # 0-based
+                    old_count = m.group(2)
+                    new_count = m.group(4)
+                    suffix = m.group(5)
+
+                    file_lines = get_file_lines(current_file)
+                    found = find_block(search_lines, file_lines, hint)
+                    if found is not None and found != hint:
+                        # Compute correct +side: account for lines added/removed before
+                        new_old = found + 1  # 1-based
+                        new_new = found + 1 + added_before
+                        old_count_s = ',{}'.format(old_count) if old_count else ''
+                        new_count_s = ',{}'.format(new_count) if new_count else ''
+                        fixed = '@@ -{}{} +{}{} @@{}'.format(
+                            new_old, old_count_s, new_new, new_count_s, suffix)
+                        print('  [fix-lines] {} hunk relocated: line {} -> {}'.format(
+                            current_file, m.group(1), new_old))
+                        hunk_header = fixed
+
+                # Track cumulative offset for next hunk
+                removed = sum(1 for bl in hunk_body if bl.startswith('-'))
+                added   = sum(1 for bl in hunk_body if bl.startswith('+'))
+                added_before += added - removed
+
+                out_lines.append(hunk_header)
+                out_lines.extend(hunk_body)
+                continue
+
+            out_lines.append(line)
+            i += 1
+
+        result = '\n'.join(out_lines)
+        if patch.endswith('\n') and not result.endswith('\n'):
+            result += '\n'
+        return result
+
     def verify_patch(self, patch: str, repo_dir: str) -> tuple:
         """Run `git apply --check`. Returns (ok, error_message)."""
         if not patch.strip():
@@ -1045,6 +1176,9 @@ class EidonAgent:
         # Remap wrong file paths: if model used a non-existent path, find the real one by basename
         patch = self._remap_patch_paths(patch, repo_dir)
 
+        # Fix line number skew: Eidon DB built on newer commit, SWE-bench checks out base_commit
+        patch = self._fix_hunk_line_numbers(patch, repo_dir)
+
         for attempt in range(2):
             ok, err = self.verify_patch(patch, repo_dir)
             if ok:
@@ -1061,6 +1195,7 @@ class EidonAgent:
                 print("  [debug] corrupt patch (first 600 chars): {}".format(repr(patch[:600])))
                 repaired = self.repair_patch(patch, err, eidon_context, task)
                 patch    = self.extract_patch(repaired)
+                patch    = self._fix_hunk_line_numbers(patch, repo_dir)
             else:
                 print("  [verify] Patch still invalid after git-repair -- submitting empty")
                 patch = ""
