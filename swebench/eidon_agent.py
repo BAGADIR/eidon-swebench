@@ -104,9 +104,17 @@ HNSW vector search on the issue description.
 
 Your task: Generate the minimal unified git diff patch that fixes the issue.
 
+!!! CRITICAL FORMAT REQUIREMENT !!!
+YOUR ENTIRE RESPONSE MUST BE A RAW UNIFIED DIFF AND NOTHING ELSE.
+DO NOT write any explanation, commentary, reasoning, or prose of any kind.
+DO NOT use markdown code fences (no ```diff, no ```python, no ```).
+YOUR RESPONSE MUST START WITH "--- a/" ON THE VERY FIRST CHARACTER.
+DO NOT say you cannot fix the issue. Either output a diff or output nothing.
+
 CRITICAL RULES:
   1. Output ONLY the raw patch -- no explanation, no markdown fences, no comments
-  2. Use standard unified diff format:
+  2. YOUR FIRST LINE MUST BE: --- a/path/to/file
+  3. Use standard unified diff format:
        --- a/relative/path/file.py
        +++ b/relative/path/file.py
        @@ -N,M +N,M @@
@@ -114,13 +122,12 @@ CRITICAL RULES:
        -removed line
        +added line
         context line
-  3. Minimal change -- only what is strictly necessary to fix the bug
-  4. NEVER modify test files
-  5. Your patch MUST make all FAIL_TO_PASS tests pass
-  6. Your patch MUST NOT break any PASS_TO_PASS tests
-  7. Respect the existing coding style (indentation, naming, error handling)
-  8. Files with blast_radius=critical affect many dependents -- be conservative
-  9. If you cannot confidently fix the issue, emit an empty string (no patch)
+  4. Minimal change -- only what is strictly necessary to fix the bug
+  5. NEVER modify test files
+  6. Your patch MUST make all FAIL_TO_PASS tests pass
+  7. Your patch MUST NOT break any PASS_TO_PASS tests
+  8. Respect the existing coding style (indentation, naming, error handling)
+  9. Files with blast_radius=critical affect many dependents -- be conservative
 """
 
 SYSTEM_REPAIR = """\
@@ -208,7 +215,8 @@ PATCH_TEMPLATE = """\
 
 ---
 
-Generate the minimal unified diff patch. Output ONLY the raw unified diff.
+Generate the minimal unified diff patch.
+OUTPUT ONLY THE RAW UNIFIED DIFF. START WITH "--- a/". NO PROSE. NO FENCES.
 """
 
 REPAIR_TEMPLATE = """\
@@ -830,6 +838,7 @@ class EidonAgent:
                 r"```diff\n(.*?)```",
                 r"```patch\n(.*?)```",
                 r"```\n(.*?)```",
+                r"```(?:python|py|text|sh)?\n(.*?)```",
             ]:
                 m = re.search(pattern, s, re.DOTALL)
                 if m:
@@ -839,13 +848,21 @@ class EidonAgent:
                         break
 
             if extracted is None:
-                for i, line in enumerate(s.split("\n")):
+                # Scan lines for any unified diff header
+                lines = s.split("\n")
+                for i, line in enumerate(lines):
                     if line.startswith("--- ") or line.startswith("diff --git"):
-                        extracted = "\n".join(s.split("\n")[i:])
+                        # Extract only up to a closing fence if present
+                        chunk = []
+                        for l in lines[i:]:
+                            if l.strip().startswith("```") and chunk:
+                                break
+                            chunk.append(l)
+                        extracted = "\n".join(chunk)
                         break
 
         if not extracted:
-            print("  [warn] Could not extract a valid patch from model output")
+            print("  [warn] Could not extract a valid patch from model output (raw[:400]: {})".format(repr(s[:400])))
             return ""
 
         # 2. Recalculate hunk headers to fix wrong line counts
