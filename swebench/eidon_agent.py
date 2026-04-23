@@ -76,12 +76,12 @@ from datasets import load_dataset
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL   = "https://api.deepseek.com/v1"
+DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("LLM_API_KEY")
+DEEPSEEK_BASE_URL   = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1")
 
 # deepseek-reasoner = thinking mode, best for complex code repair (Stage 3 + 4)
-MODEL_PATCH         = "deepseek-reasoner"
-MODEL_REPAIR        = "deepseek-reasoner"
+MODEL_PATCH         = os.environ.get("LLM_MODEL_PATCH", "deepseek-reasoner")
+MODEL_REPAIR        = os.environ.get("LLM_MODEL_REPAIR", "deepseek-reasoner")
 
 EIDON_BIN           = "eidon"        # installed via: npm install -g eidoncore
 TOKEN_BUDGET        = 32000          # eidon_encoding token budget
@@ -380,8 +380,7 @@ class EidonAgent:
     def __init__(self, cache_dir: Optional[str] = None):
         if not DEEPSEEK_API_KEY:
             raise ValueError(
-                "DEEPSEEK_API_KEY environment variable not set.\n"
-                "Get your key at: https://platform.deepseek.com/api_keys"
+                "DEEPSEEK_API_KEY or LLM_API_KEY environment variable not set."
             )
         self.client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
         self.cache_dir           = cache_dir
