@@ -565,10 +565,14 @@ class EidonAgent:
         try:
             # Truncate intent to avoid overwhelming the search query
             intent = problem_statement[:1000].strip()
-            print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})...".format(
-                TOKEN_BUDGET))
+            # Use smaller budget for large DBs to reduce graphology query time
+            db_path = Path(repo_path) / ".eidon" / "eidon.db"
+            db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
+            budget = 4000 if db_mb > 50 else TOKEN_BUDGET
+            print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
+                budget, db_mb))
             start = time.time()
-            context = mcp.call_encoding(intent=intent, token_budget=TOKEN_BUDGET)
+            context = mcp.call_encoding(intent=intent, token_budget=budget)
             elapsed = time.time() - start
 
             if context:
