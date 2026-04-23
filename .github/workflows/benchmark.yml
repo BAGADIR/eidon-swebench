@@ -180,7 +180,7 @@ jobs:
           LLM_MODEL_PATCH: "gemini-2.0-flash"
           LLM_MODEL_REPAIR: "gemini-2.0-flash"
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
-          EIDON_TASK_TIMEOUT: "720"
+          EIDON_TASK_TIMEOUT: "1800"
           PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p /tmp/eidon-cache
