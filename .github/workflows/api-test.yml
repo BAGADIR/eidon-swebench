@@ -9,21 +9,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           BASE="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-          for model in "gemini-2.0-flash" "gemini-2.5-flash-preview-05-20" "gemini-2.5-pro-preview-05-06"; do
+          for model in gemini-2.0-flash gemini-2.5-flash-preview-05-20 gemini-2.5-pro-preview-05-06; do
             echo "=== $model ==="
-            curl -s -X POST "$BASE" \
-              -H "Authorization: Bearer $GEMINI_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}],\"max_tokens\":5}" \
-              | python3 -c "
-import sys,json
-raw=sys.stdin.read()
-try:
-  d=json.loads(raw)
-  if 'choices' in d: print('OK:', d['choices'][0]['message']['content'])
-  elif 'error' in d: print('ERR:', d['error'].get('message','?')[:120])
-  else: print('RAW:', raw[:200])
-except: print('RAW:', raw[:200])
-" || true
+            curl -s -X POST "$BASE" -H "Authorization: Bearer $GEMINI_API_KEY" -H "Content-Type: application/json" -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}],\"max_tokens\":5}" | jq -r 'if .choices then .choices[0].message.content else .error.message end' || true
           done
-          exit 0
