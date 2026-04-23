@@ -266,6 +266,11 @@ class EidonMCPClient:
                 target=self._reader_loop, daemon=True
             )
             self._reader_thread.start()
+            # Background thread logs stderr for debugging
+            threading.Thread(
+                target=lambda: [print("  [mcp:err] " + ln.rstrip()) for ln in self._proc.stderr if ln.strip()],
+                daemon=True,
+            ).start()
 
             # Send MCP initialize handshake
             resp = self._rpc("initialize", {
@@ -358,7 +363,7 @@ class EidonMCPClient:
                 "intent": intent,
                 "token_budget": token_budget,
             },
-        }, timeout=120.0)
+        }, timeout=300.0)
 
         if result is None:
             return None
