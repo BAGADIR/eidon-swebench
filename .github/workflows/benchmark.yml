@@ -19,6 +19,10 @@ on:
         description: "Run ID to download Eidon DBs from (only used when skip_preanalyze=true)"
         required: false
         default: ""
+      task_offset:
+        description: "Global task offset (skip first N tasks, useful for testing non-astropy tasks)"
+        required: false
+        default: "0"
 
 jobs:
 
@@ -97,13 +101,14 @@ jobs:
         run: |
           NUM_JOBS=${{ github.event.inputs.num_jobs || '5' }}
           NUM_TASKS=${{ github.event.inputs.num_tasks || 'all' }}
+          GLOBAL_OFFSET=${{ github.event.inputs.task_offset || '0' }}
           if [ "$NUM_TASKS" = "all" ]; then TOTAL=500; else TOTAL=$NUM_TASKS; fi
           TASKS_PER_JOB=$(( (TOTAL + NUM_JOBS - 1) / NUM_JOBS ))
           MATRIX="["
           for i in $(seq 0 $((NUM_JOBS - 1))); do
-            OFFSET=$(( i * TASKS_PER_JOB ))
+            OFFSET=$(( GLOBAL_OFFSET + i * TASKS_PER_JOB ))
             LIMIT=$TASKS_PER_JOB
-            if [ $(( OFFSET + LIMIT )) -gt $TOTAL ]; then LIMIT=$(( TOTAL - OFFSET )); fi
+            if [ $(( OFFSET + LIMIT )) -gt $(( GLOBAL_OFFSET + TOTAL )) ]; then LIMIT=$(( GLOBAL_OFFSET + TOTAL - OFFSET )); fi
             if [ $LIMIT -le 0 ]; then break; fi
             if [ "$MATRIX" != "[" ]; then MATRIX="$MATRIX,"; fi
             MATRIX="$MATRIX{"shard":$i,"offset":$OFFSET,"limit":$LIMIT}"
