@@ -628,16 +628,28 @@ class EidonAgent:
         if len(test_patch) > 4000:
             test_patch = test_patch[:4000] + "\n... (truncated)"
 
-        # Extract actual file contents from the checked-out repo
-        # Parse --- a/ lines from eidon_context to find relevant files
+        # Extract actual file contents from the checked-out repo.
+        # Scan eidon_context + test_patch + problem_statement for .py paths.
         actual_files = ""
-        if repo_dir and eidon_context:
-            mentioned = re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/|File:\s*)(\S+\.py)', eidon_context)
-            # Also scan for paths like "path/to/file.py" patterns in context
-            mentioned += re.findall(r'\b([\w/.-]+\.py)\b', eidon_context)
+        if repo_dir:
+            all_text = (eidon_context or "") + "\n" + task.get("test_patch", "") + "\n" + task.get("problem_statement", "")
+            mentioned = re.findall(r'\b([\w][\w/.-]*/[\w.-]+\.py)\b', all_text)
+            # From test paths like "pkg/tests/test_foo.py", also try "pkg/core/foo.py"
+            expanded = list(mentioned)
+            for p in mentioned:
+                parts = p.replace('\\', '/').split('/')
+                fname = parts[-1]
+                if fname.startswith('test_'):
+                    src_name = fname[5:]  # strip "test_" prefix
+                    pkg = parts[0] if parts else ''
+                    if pkg:
+                        expanded += ['{}/core/{}'.format(pkg, src_name),
+                                     '{}/{}'.format(pkg, src_name)]
             seen = set()
             file_sections = []
-            for rel in mentioned:
+            total_chars = 0
+            for rel in expanded:
+                rel = rel.strip('/')
                 if rel in seen:
                     continue
                 seen.add(rel)
@@ -645,13 +657,15 @@ class EidonAgent:
                 if full.exists() and full.stat().st_size < 200_000:
                     try:
                         content = full.read_text(errors='replace')
-                        file_sections.append("### {}\n```python\n{}\n```".format(rel, content))
-                        if len("\n\n".join(file_sections)) > 80_000:
+                        section = "### {}\n```python\n{}\n```".format(rel, content)
+                        total_chars += len(section)
+                        if total_chars > 100_000:
                             break
+                        file_sections.append(section)
                     except Exception:
                         pass
             if file_sections:
-                actual_files = "\n\n".join(file_sections[:6])
+                actual_files = "\n\n".join(file_sections[:10])
         if not actual_files:
             actual_files = "(Not available — use Eidon context above for file structure)"
 
@@ -1055,6 +1069,22 @@ class EidonAgent:
 
         # Strip git format-patch email footer ("-- \n2.45.2\n" etc.)
         extracted = re.sub(r'\n-- \n[0-9]+\.[0-9]+.*$', '', extracted, flags=re.DOTALL)
+
+        # Strip any non-diff junk lines appended after the last valid hunk
+        # (e.g. model appends "[filepath]...", "[code]...", prose, etc.)
+        valid_prefixes = (' ', '+', '-', '@', 'd', '-', 'i', 'n', 'o', '\\')
+        lines = extracted.split('\n')
+        last_valid = -1
+        for idx, l in enumerate(lines):
+            if l and l[0] in ' +-@\\':
+                last_valid = idx
+            elif (l.startswith('diff ') or l.startswith('--- ') or
+                  l.startswith('+++ ') or l.startswith('index ') or
+                  l.startswith('new file') or l.startswith('deleted file') or
+                  l == ''):
+                last_valid = idx
+        if last_valid >= 0:
+            extracted = '\n'.join(lines[:last_valid + 1])
 
         # Ensure trailing newline (git apply requires it)
         if not extracted.endswith("\n"):
