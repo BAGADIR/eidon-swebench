@@ -967,9 +967,17 @@ class EidonAgent:
         patch      = self.extract_patch(raw_output)
 
         # Stage 4: git apply repair loop (fix corrupt hunks)
+        JUNK_FILES = {".git_archival.txt", ".codecov.yml", ".gitignore",
+                      ".travis.yml", "setup.cfg", "tox.ini", ".editorconfig"}
         for attempt in range(2):
             ok, err = self.verify_patch(patch, repo_dir)
             if ok:
+                # Sanity check: reject patches that only touch irrelevant config/meta files
+                patched_files = [l[6:] for l in patch.splitlines() if l.startswith("+++ b/")]
+                if patched_files and all(f.split("/")[-1] in JUNK_FILES for f in patched_files):
+                    print("  [warn] Repair produced junk-only patch ({}) -- discarding".format(patched_files))
+                    patch = ""
+                    break
                 label = " (after {} git-repair attempt(s))".format(attempt) if attempt else ""
                 print("  [verify] Patch applies cleanly{}".format(label))
                 break
@@ -977,7 +985,8 @@ class EidonAgent:
                 repaired = self.repair_patch(patch, err, eidon_context, task)
                 patch    = self.extract_patch(repaired)
             else:
-                print("  [verify] Patch still invalid after git-repair -- will submit as-is")
+                print("  [verify] Patch still invalid after git-repair -- submitting empty")
+                patch = ""
 
         # Stage 5: Test execution loop (run FAIL_TO_PASS, re-patch on failure)
         if patch.strip() and fail_to_pass:
