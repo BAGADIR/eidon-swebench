@@ -4,17 +4,34 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Test Gemini models
+      - name: List and test Gemini models
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          BASE="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-          for model in gemini-2.0-flash gemini-2.5-flash-preview-05-20 gemini-2.5-pro-preview-05-06; do
-            echo "=== $model ==="
-            curl -s -X POST "$BASE" \
-              -H "Authorization: Bearer $GEMINI_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d '{"model":"'"'"'$model'"'"'","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
-              | head -c 500
-            echo ""
-          done
+          python3 << 'PYEOF'
+          import urllib.request, json, os
+          key = os.environ['GEMINI_API_KEY']
+          base = 'https://generativelanguage.googleapis.com/v1beta/openai'
+          print('=== LISTING MODELS ===')
+          req = urllib.request.Request(base + '/models', headers={'Authorization': 'Bearer ' + key})
+          try:
+              r = urllib.request.urlopen(req)
+              data = json.loads(r.read())
+              for m in sorted(x.get('id','') for x in data.get('data',[])):
+                  print(' ', m)
+          except Exception as e:
+              print('List failed:', e)
+          print('')
+          print('=== TESTING MODELS ===')
+          for model in ['gemini-2.5-flash-preview-05-20','gemini-2.5-pro-preview-05-06','gemini-2.0-flash','gemini-2.0-flash-001','gemini-1.5-flash']:
+              payload = json.dumps({'model':model,'messages':[{'role':'user','content':'say OK'}],'max_tokens':10}).encode()
+              req = urllib.request.Request(base + '/chat/completions', data=payload, headers={'Authorization':'Bearer ' + key,'Content-Type':'application/json'}, method='POST')
+              try:
+                  r = urllib.request.urlopen(req)
+                  resp = json.loads(r.read())
+                  print('OK ', model, ':', resp['choices'][0]['message']['content'])
+              except urllib.error.HTTPError as e:
+                  print('ERR', model, ':', e.code, e.read().decode()[:150])
+              except Exception as e:
+                  print('ERR', model, ':', e)
+          PYEOF
