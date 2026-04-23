@@ -673,7 +673,7 @@ class EidonAgent:
             return False, "empty patch"
         try:
             result = subprocess.run(
-                ["git", "apply", "--check", "--recount", "-"],
+                ["git", "apply", "--check", "--recount", "--ignore-whitespace", "-"],
                 input=patch, cwd=repo_dir,
                 capture_output=True, text=True, timeout=30,
             )
@@ -687,7 +687,7 @@ class EidonAgent:
         """Apply patch to repo. Returns True on success."""
         try:
             result = subprocess.run(
-                ["git", "apply", "--recount", "-"],
+                ["git", "apply", "--recount", "--ignore-whitespace", "-"],
                 input=patch, cwd=repo_dir,
                 capture_output=True, text=True, timeout=30,
             )
@@ -865,7 +865,9 @@ class EidonAgent:
             print("  [warn] Could not extract a valid patch from model output (raw[:400]: {})".format(repr(s[:400])))
             return ""
 
-        # Return as-is; git apply --recount handles any hunk header count mismatches
+        # Ensure trailing newline (git apply requires it)
+        if not extracted.endswith("\n"):
+            extracted += "\n"
         return extracted
 
     def _fix_hunk_headers(self, patch: str) -> str:
