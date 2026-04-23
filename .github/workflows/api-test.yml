@@ -11,5 +11,10 @@ jobs:
           BASE="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
           for model in gemini-2.0-flash gemini-2.5-flash-preview-05-20 gemini-2.5-pro-preview-05-06; do
             echo "=== $model ==="
-            curl -s -X POST "$BASE" -H "Authorization: Bearer $GEMINI_API_KEY" -H "Content-Type: application/json" -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}],\"max_tokens\":5}" | jq -r 'if .choices then .choices[0].message.content else .error.message end' || true
+            curl -s -X POST "$BASE" \
+              -H "Authorization: Bearer $GEMINI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"model":"'"'"'$model'"'"'","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
+              | head -c 500
+            echo ""
           done
