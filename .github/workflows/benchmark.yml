@@ -11,15 +11,10 @@ on:
         description: "Parallel shard jobs"
         required: false
         default: "15"
-
-env:
-  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-  EIDON_LLM_PROVIDER: openai
-  EIDON_LLM_BASE_URL: https://api.deepseek.com/v1
-  EIDON_LLM_MODEL: deepseek-chat
-  EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-  EIDON_LLM_CONCURRENCY: "20"
-  EIDON_PHASE7_FILE_LIMIT: "200"
+      skip_preanalyze:
+        description: "Skip pre-analyze (use existing artifacts)"
+        required: false
+        default: "false"
 
 jobs:
 
@@ -30,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     continue-on-error: true
+    if: ${{ github.event.inputs.skip_preanalyze != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -62,9 +58,8 @@ jobs:
 
       - name: Run eidon analyze
         env:
-          EIDON_LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          EIDON_PHASE7_FILE_LIMIT: "100"
-          EIDON_LLM_CONCURRENCY: "20"
+          EIDON_PHASE7_FILE_LIMIT: "0"
+          EIDON_LLM_CONCURRENCY: "0"
           EIDON_MAX_RECHECK_CYCLES: "0"
           EIDON_RECHECK_BUDGET: "0"
           EIDON_AI_COURT_BUDGET: "0"
@@ -82,7 +77,7 @@ jobs:
           name: eidon-db-${{ matrix.key }}
           path: /tmp/repo/.eidon/eidon.db
           if-no-files-found: warn
-          retention-days: 1
+          retention-days: 7
 
   # ── Build shard matrix ─────────────────────────────────────────────────────
   setup:
