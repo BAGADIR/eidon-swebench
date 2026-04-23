@@ -85,7 +85,7 @@ MODEL_REPAIR        = os.environ.get("LLM_MODEL_REPAIR", "deepseek-reasoner")
 
 EIDON_BIN           = "eidon"        # installed via: npm install -g eidoncore
 TOKEN_BUDGET        = 8000           # eidon_encoding token budget
-MAX_PATCH_TOKENS    = 8000           # max tokens for patch output
+MAX_PATCH_TOKENS    = 32000          # max tokens for patch output
 TASK_TIMEOUT        = int(os.environ.get("EIDON_TASK_TIMEOUT", "1800"))  # 30 min per task
 OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
