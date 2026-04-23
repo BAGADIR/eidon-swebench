@@ -65,7 +65,7 @@ jobs:
           EIDON_LLM_PROVIDER: "openai"
           EIDON_LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EIDON_LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          EIDON_LLM_MODEL: "gemini-3.1-flash-lite-preview"
+          EIDON_LLM_MODEL: "gemini-flash-latest"
           EIDON_LLM_CONCURRENCY: "8"
           EIDON_PHASE7_FILE_LIMIT: "200"
           EIDON_MAX_RECHECK_CYCLES: "0"
@@ -177,8 +177,8 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL_PATCH: "gemini-3.1-flash-lite-preview"
-          LLM_MODEL_REPAIR: "gemini-3.1-flash-lite-preview"
+          LLM_MODEL_PATCH: "gemini-3.1-pro-preview"
+          LLM_MODEL_REPAIR: "gemini-3.1-pro-preview"
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
           EIDON_TASK_TIMEOUT: "1800"
           PYTHONUNBUFFERED: "1"
