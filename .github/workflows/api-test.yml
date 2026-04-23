@@ -4,27 +4,25 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Test gemini-2.0-flash
+      - name: Test Gemini models
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          curl -sf -X POST \
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
-            -H "Authorization: Bearer $GEMINI_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"gemini-2.0-flash","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print('MODEL OK:', d['choices'][0]['message']['content'])"
-          echo "--- testing gemini-2.5-flash ---"
-          curl -sf -X POST \
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
-            -H "Authorization: Bearer $GEMINI_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"gemini-2.5-flash-preview-05-20","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print('2.5-FLASH OK:', d['choices'][0]['message']['content'])" || echo "2.5-flash FAILED"
-          echo "--- testing gemini-2.5-pro ---"
-          curl -sf -X POST \
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
-            -H "Authorization: Bearer $GEMINI_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"gemini-2.5-pro-preview-05-06","messages":[{"role":"user","content":"say OK"}],"max_tokens":5}' \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print('2.5-PRO OK:', d['choices'][0]['message']['content'])" || echo "2.5-pro FAILED"
+          BASE="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+          for model in "gemini-2.0-flash" "gemini-2.5-flash-preview-05-20" "gemini-2.5-pro-preview-05-06"; do
+            echo "=== $model ==="
+            curl -s -X POST "$BASE" \
+              -H "Authorization: Bearer $GEMINI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}],\"max_tokens\":5}" \
+              | python3 -c "
+import sys,json
+raw=sys.stdin.read()
+try:
+  d=json.loads(raw)
+  if 'choices' in d: print('OK:', d['choices'][0]['message']['content'])
+  elif 'error' in d: print('ERR:', d['error'].get('message','?')[:120])
+  else: print('RAW:', raw[:200])
+except: print('RAW:', raw[:200])
+"
+          done
