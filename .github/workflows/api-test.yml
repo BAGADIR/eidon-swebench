@@ -14,7 +14,7 @@ jobs:
           base = "https://generativelanguage.googleapis.com/v1beta/openai"
           print("=== TESTING MODELS ===")
           for model in ["gemini-flash-latest","gemini-pro-latest","gemini-3.1-pro-preview","gemini-3-pro-preview","gemini-3.1-flash-lite-preview"]:
-              payload = json.dumps({"model":model,"messages":[{"role":"user","content":"say OK"}],"max_tokens":10}).encode()
+              payload = json.dumps({"model":model,"messages":[{"role":"user","content":"Reply with exactly the word: OK"}],"max_tokens":200}).encode()
               req = urllib.request.Request(base + "/chat/completions", data=payload, headers={"Authorization":"Bearer " + key,"Content-Type":"application/json"}, method="POST")
               try:
                   r = urllib.request.urlopen(req)
@@ -23,9 +23,11 @@ jobs:
                   if choices:
                       msg = choices[0].get("message",{})
                       text = msg.get("content") or msg.get("text") or str(msg)
+                      finish = choices[0].get("finish_reason","?")
                   else:
-                      text = str(resp)[:150]
-                  print("OK  " + model + " : " + str(text))
+                      text = str(resp)[:200]
+                      finish = "no_choices"
+                  print("OK  " + model + " finish=" + str(finish) + " : " + str(text)[:100])
               except urllib.error.HTTPError as e:
                   print("ERR " + model + " : " + str(e.code) + " " + e.read().decode()[:150])
               except Exception as e:
