@@ -193,6 +193,12 @@ PATCH_TEMPLATE = """\
 
 ---
 
+## Actual File Contents (checked-out base commit — diff MUST match these exactly)
+
+{actual_files}
+
+---
+
 ## GitHub Issue
 
 **Repository:** {repo}
@@ -215,7 +221,7 @@ PATCH_TEMPLATE = """\
 
 ---
 
-Generate the minimal unified diff patch.
+Generate the minimal unified diff patch against the ACTUAL FILE CONTENTS above.
 OUTPUT ONLY THE RAW UNIFIED DIFF. START WITH "--- a/". NO PROSE. NO FENCES.
 """
 
@@ -600,10 +606,9 @@ class EidonAgent:
 
     # ── Stage 3: Generate patch ───────────────────────────────────────────────
 
-    def generate_patch(self, eidon_context: str, task: dict) -> str:
+    def generate_patch(self, eidon_context: str, task: dict, repo_dir: str = "") -> str:
         """
-        Call DeepSeek-reasoner with Eidon's focused context + issue + tests.
-        No file sources needed separately — eidon_encoding already includes them.
+        Call the LLM with Eidon's focused context + actual file contents + issue + tests.
         """
         hints         = (task.get("hints_text", "") or "").strip()
         hints_section = "**Hints from the issue thread:**\n{}".format(hints) if hints else ""
@@ -623,8 +628,36 @@ class EidonAgent:
         if len(test_patch) > 4000:
             test_patch = test_patch[:4000] + "\n... (truncated)"
 
+        # Extract actual file contents from the checked-out repo
+        # Parse --- a/ lines from eidon_context to find relevant files
+        actual_files = ""
+        if repo_dir and eidon_context:
+            mentioned = re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/|File:\s*)(\S+\.py)', eidon_context)
+            # Also scan for paths like "path/to/file.py" patterns in context
+            mentioned += re.findall(r'\b([\w/.-]+\.py)\b', eidon_context)
+            seen = set()
+            file_sections = []
+            for rel in mentioned:
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                full = Path(repo_dir) / rel
+                if full.exists() and full.stat().st_size < 200_000:
+                    try:
+                        content = full.read_text(errors='replace')
+                        file_sections.append("### {}\n```python\n{}\n```".format(rel, content))
+                        if len("\n\n".join(file_sections)) > 80_000:
+                            break
+                    except Exception:
+                        pass
+            if file_sections:
+                actual_files = "\n\n".join(file_sections[:6])
+        if not actual_files:
+            actual_files = "(Not available — use Eidon context above for file structure)"
+
         user_content = PATCH_TEMPLATE.format(
             eidon_context=eidon_context or "(no context from Eidon)",
+            actual_files=actual_files,
             repo=task.get("repo", ""),
             problem_statement=task.get("problem_statement", ""),
             hints_section=hints_section,
@@ -999,8 +1032,8 @@ class EidonAgent:
         if not eidon_context:
             print("  [warn] No Eidon context -- patch quality may be reduced")
 
-        # Stage 3: Generate patch using Eidon context
-        raw_output = self.generate_patch(eidon_context, task)
+        # Stage 3: Generate patch using Eidon context + actual file contents
+        raw_output = self.generate_patch(eidon_context, task, repo_dir)
         patch      = self.extract_patch(raw_output)
         if not patch:
             print("  [debug] raw model output (first 600 chars): {}".format(repr(raw_output[:600])))
