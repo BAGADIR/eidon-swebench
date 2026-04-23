@@ -13,8 +13,8 @@ jobs:
           key = os.environ["GEMINI_API_KEY"]
           base = "https://generativelanguage.googleapis.com/v1beta/openai"
           print("=== TESTING MODELS ===")
-          for model in ["gemini-flash-latest","gemini-pro-latest","gemini-3.1-pro-preview","gemini-3-pro-preview","gemini-3.1-flash-lite-preview"]:
-              payload = json.dumps({"model":model,"messages":[{"role":"user","content":"Reply with exactly the word: OK"}],"max_tokens":200}).encode()
+          for model in ["gemini-2.5-pro","gemini-2.5-flash","gemini-2.5-pro-preview","gemini-2.5-flash-preview","gemini-2.5-pro-exp-03-25","gemini-2.5-flash-preview-04-17","gemini-flash-latest","gemini-pro-latest"]:
+              payload = json.dumps({"model":model,"messages":[{"role":"user","content":"Output ONLY a raw unified diff patch. No prose. Start with --- a/example.py\n+++ b/example.py\n@@ -1,3 +1,4 @@\n def foo():\n-    return 1\n+    return 2\n+\n def bar(): pass"}],"max_tokens":4000}).encode()
               req = urllib.request.Request(base + "/chat/completions", data=payload, headers={"Authorization":"Bearer " + key,"Content-Type":"application/json"}, method="POST")
               try:
                   r = urllib.request.urlopen(req)
