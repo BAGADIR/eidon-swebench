@@ -363,7 +363,7 @@ class EidonMCPClient:
                 "intent": intent,
                 "token_budget": token_budget,
             },
-        }, timeout=1200.0)
+        }, timeout=90.0)
 
         if result is None:
             return None
@@ -568,6 +568,10 @@ class EidonAgent:
             # Use smaller budget for large DBs to reduce graphology query time
             db_path = Path(repo_path) / ".eidon" / "eidon.db"
             db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
+            # Skip MCP entirely for very large DBs — query never completes in time
+            if db_mb > 100:
+                print("  [mcp] DB too large ({:.0f}MB) — skipping MCP to avoid timeout".format(db_mb))
+                return ""
             budget = 4000 if db_mb > 50 else TOKEN_BUDGET
             print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
                 budget, db_mb))
@@ -620,8 +624,7 @@ class EidonAgent:
             test_patch=test_patch if test_patch else "(not provided)",
         )
 
-        print("  [patch] Calling deepseek-reasoner (~{:,} est. tokens)...".format(
-            len(user_content) // 4))
+        print("  [patch] Calling {} (~{:,} est. tokens)...".format(MODEL_PATCH, len(user_content) // 4))
         start = time.time()
 
         try:
