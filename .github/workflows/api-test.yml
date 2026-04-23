@@ -19,7 +19,13 @@ jobs:
               try:
                   r = urllib.request.urlopen(req)
                   resp = json.loads(r.read())
-                  print("OK  " + model + " : " + resp["choices"][0]["message"]["content"])
+                  choices = resp.get("choices",[])
+                  if choices:
+                      msg = choices[0].get("message",{})
+                      text = msg.get("content") or msg.get("text") or str(msg)
+                  else:
+                      text = str(resp)[:150]
+                  print("OK  " + model + " : " + str(text))
               except urllib.error.HTTPError as e:
                   print("ERR " + model + " : " + str(e.code) + " " + e.read().decode()[:150])
               except Exception as e:
