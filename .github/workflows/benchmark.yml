@@ -182,8 +182,8 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL_PATCH: "gemini-3.1-pro-preview"
-          LLM_MODEL_REPAIR: "gemini-3.1-pro-preview"
+          LLM_MODEL_PATCH: "gemini-2.5-pro"
+          LLM_MODEL_REPAIR: "gemini-2.5-pro"
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
           EIDON_TASK_TIMEOUT: "1800"
           PYTHONUNBUFFERED: "1"
