@@ -15,6 +15,10 @@ on:
         description: "Skip pre-analyze (use existing artifacts)"
         required: false
         default: "false"
+      db_run_id:
+        description: "Run ID to download Eidon DBs from (only used when skip_preanalyze=true)"
+        required: false
+        default: ""
 
 jobs:
 
@@ -127,6 +131,8 @@ jobs:
           pattern: eidon-db-*
           path: /tmp/eidon-preload
           merge-multiple: false
+          run-id: ${{ github.event.inputs.db_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
       - name: List preloaded DBs
