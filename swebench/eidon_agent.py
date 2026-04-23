@@ -893,8 +893,16 @@ class EidonAgent:
                     lines[i].startswith("diff ") or
                     lines[i].startswith("--- ")
                 ):
-                    hunk_lines.append(lines[i])
+                    l = lines[i]
+                    # Stop if line is not a valid unified-diff line
+                    if l and l[0] not in ' +-\\':
+                        break
+                    hunk_lines.append(l)
                     i += 1
+
+                # Strip trailing blank lines (avoid off-by-one in count)
+                while hunk_lines and hunk_lines[-1].strip() == "":
+                    hunk_lines.pop()
 
                 # Parse old start from existing header
                 m = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)", line)
@@ -907,7 +915,7 @@ class EidonAgent:
                     out.extend(hunk_lines)
                     continue
 
-                # Recount
+                # Recount (context lines count in both; removed only in old; added only in new)
                 old_count = sum(1 for l in hunk_lines if not l.startswith("+"))
                 new_count = sum(1 for l in hunk_lines if not l.startswith("-"))
 
@@ -965,6 +973,8 @@ class EidonAgent:
         # Stage 3: Generate patch using Eidon context
         raw_output = self.generate_patch(eidon_context, task)
         patch      = self.extract_patch(raw_output)
+        if not patch:
+            print("  [debug] raw model output (first 600 chars): {}".format(repr(raw_output[:600])))
 
         # Stage 4: git apply repair loop (fix corrupt hunks)
         JUNK_FILES = {".git_archival.txt", ".codecov.yml", ".gitignore",
@@ -982,6 +992,7 @@ class EidonAgent:
                 print("  [verify] Patch applies cleanly{}".format(label))
                 break
             if attempt < 1:
+                print("  [debug] corrupt patch (first 600 chars): {}".format(repr(patch[:600])))
                 repaired = self.repair_patch(patch, err, eidon_context, task)
                 patch    = self.extract_patch(repaired)
             else:
