@@ -164,11 +164,11 @@ jobs:
       - name: Run benchmark shard ${{ matrix.shard }}
         working-directory: swebench
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL_PATCH: "gemini-2.0-flash-thinking-exp"
-          LLM_MODEL_REPAIR: "gemini-2.0-flash"
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LLM_BASE_URL: "https://api.deepseek.com/v1"
+          LLM_MODEL_PATCH: "deepseek-chat"
+          LLM_MODEL_REPAIR: "deepseek-chat"
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
           EIDON_TASK_TIMEOUT: "720"
           PYTHONUNBUFFERED: "1"
