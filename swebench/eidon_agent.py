@@ -396,7 +396,7 @@ class EidonMCPClient:
                 "intent": intent,
                 "token_budget": token_budget,
             },
-        }, timeout=90.0)
+        }, timeout=180.0)
 
         if result is None:
             return None
@@ -601,11 +601,13 @@ class EidonAgent:
             # Use smaller budget for large DBs to reduce graphology query time
             db_path = Path(repo_path) / ".eidon" / "eidon.db"
             db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
-            # Skip MCP entirely for very large DBs — query never completes in time
+            # Use progressively smaller budgets for large DBs to keep query fast
             if db_mb > 100:
-                print("  [mcp] DB too large ({:.0f}MB) — skipping MCP to avoid timeout".format(db_mb))
-                return ""
-            budget = 4000 if db_mb > 50 else TOKEN_BUDGET
+                budget = 500
+            elif db_mb > 50:
+                budget = 2000
+            else:
+                budget = TOKEN_BUDGET
             print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
                 budget, db_mb))
             start = time.time()
@@ -1319,7 +1321,7 @@ class EidonAgent:
         # Fix line number skew: Eidon DB built on newer commit, SWE-bench checks out base_commit
         patch = self._fix_hunk_line_numbers(patch, repo_dir)
 
-        for attempt in range(2):
+        for attempt in range(4):
             ok, err = self.verify_patch(patch, repo_dir)
             if ok:
                 # Sanity check: reject patches that only touch irrelevant config/meta files
@@ -1331,13 +1333,13 @@ class EidonAgent:
                 label = " (after {} git-repair attempt(s))".format(attempt) if attempt else ""
                 print("  [verify] Patch applies cleanly{}".format(label))
                 break
-            if attempt < 1:
+            if attempt < 3:
                 print("  [debug] corrupt patch (first 600 chars): {}".format(repr(patch[:600])))
                 repaired = self.repair_patch(patch, err, eidon_context, task, repo_dir)
                 patch    = self.extract_patch(repaired)
                 patch    = self._fix_hunk_line_numbers(patch, repo_dir)
             else:
-                print("  [verify] Patch still invalid after git-repair -- submitting empty")
+                print("  [verify] Patch still invalid after 3 git-repair attempts -- submitting empty")
                 patch = ""
 
         # Stage 5: Test execution loop (run FAIL_TO_PASS, re-patch on failure)
