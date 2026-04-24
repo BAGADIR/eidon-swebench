@@ -1319,7 +1319,8 @@ class EidonAgent:
         # Fix line number skew: Eidon DB built on newer commit, SWE-bench checks out base_commit
         patch = self._fix_hunk_line_numbers(patch, repo_dir)
 
-        for attempt in range(4):
+        MAX_REPAIR_ATTEMPTS = 6
+        for attempt in range(MAX_REPAIR_ATTEMPTS + 1):
             ok, err = self.verify_patch(patch, repo_dir)
             if ok:
                 # Sanity check: reject patches that only touch irrelevant config/meta files
@@ -1331,13 +1332,13 @@ class EidonAgent:
                 label = " (after {} git-repair attempt(s))".format(attempt) if attempt else ""
                 print("  [verify] Patch applies cleanly{}".format(label))
                 break
-            if attempt < 3:
+            if attempt < MAX_REPAIR_ATTEMPTS:
                 print("  [debug] corrupt patch (first 600 chars): {}".format(repr(patch[:600])))
                 repaired = self.repair_patch(patch, err, eidon_context, task, repo_dir)
                 patch    = self.extract_patch(repaired)
                 patch    = self._fix_hunk_line_numbers(patch, repo_dir)
             else:
-                print("  [verify] Patch still invalid after 3 git-repair attempts -- submitting empty")
+                print("  [verify] Patch still invalid after {} git-repair attempts -- submitting empty".format(MAX_REPAIR_ATTEMPTS))
                 patch = ""
 
         # Stage 5: Test execution loop (run FAIL_TO_PASS, re-patch on failure)
