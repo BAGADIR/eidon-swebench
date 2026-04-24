@@ -96,13 +96,9 @@ MODEL_NAME_TAG      = "eidon-mcp-deepseek-reasoner"
 SYSTEM_PATCH = """\
 You are an expert software engineer fixing a real GitHub issue.
 
-Eidon has already analyzed the entire repository and given you a focused,
-semantically-ranked context: the files most relevant to this issue, their
-full source, and the architectural graph (CodeRank, blast_radius, community,
-dependencies). You did not browse files. Eidon selected them for you using
-HNSW vector search on the issue description.
-
-Your task: Generate the minimal unified git diff patch that fixes the issue.
+You have been given:
+1. Eidon's semantic context (relevant files, ranked by CodeRank + HNSW search)
+2. THE ACTUAL FILE CONTENTS FROM THE CHECKED-OUT REPOSITORY (exact state you must diff against)
 
 !!! CRITICAL FORMAT REQUIREMENT !!!
 YOUR ENTIRE RESPONSE MUST BE A RAW UNIFIED DIFF AND NOTHING ELSE.
@@ -111,6 +107,13 @@ DO NOT use markdown code fences (no ```diff, no ```python, no ```).
 YOUR RESPONSE MUST START WITH "--- a/" ON THE VERY FIRST CHARACTER.
 DO NOT say you cannot fix the issue. Either output a diff or output nothing.
 
+!!! CRITICAL: LINE NUMBERS !!!
+The "## Actual File Contents" section shows the EXACT file content in the checked-out repo.
+You MUST generate your diff against THOSE EXACT LINES.
+Count line numbers from the actual file content provided.
+DO NOT use line numbers from Eidon context -- Eidon's DB may be from a different commit.
+If a file is not shown in "## Actual File Contents", do NOT patch it.
+
 CRITICAL RULES:
   1. Output ONLY the raw patch -- no explanation, no markdown fences, no comments
   2. YOUR FIRST LINE MUST BE: --- a/path/to/file
@@ -118,30 +121,38 @@ CRITICAL RULES:
        --- a/relative/path/file.py
        +++ b/relative/path/file.py
        @@ -N,M +N,M @@
-        context line
-       -removed line
+        context line (3 lines of context before and after each change)
+       -removed line (must exist VERBATIM in the actual file content provided)
        +added line
         context line
-  4. Minimal change -- only what is strictly necessary to fix the bug
-  5. NEVER modify test files
-  6. Your patch MUST make all FAIL_TO_PASS tests pass
-  7. Your patch MUST NOT break any PASS_TO_PASS tests
+  4. Context lines (-N,M in the @@ header) MUST exist verbatim in the actual file shown above
+  5. Minimal change -- only what is strictly necessary to fix the bug
+  6. NEVER modify test files
+  7. Your patch MUST make all FAIL_TO_PASS tests pass
   8. Respect the existing coding style (indentation, naming, error handling)
-  9. Files with blast_radius=critical affect many dependents -- be conservative
 """
 
 SYSTEM_REPAIR = """\
 You are an expert software engineer. A git patch you generated failed to apply.
+The actual file contents from the checked-out repository are provided to you below.
 
 Fix the patch so it applies cleanly to the repository.
+
+!!! CRITICAL: You MUST use the ACTUAL FILE CONTENTS provided to determine correct line numbers.
+The old patch had wrong line numbers or wrong context lines. Regenerate the patch from scratch
+using the actual file content -- do NOT reuse the old line numbers or context lines.
 
 Common failure reasons:
   - Wrong context lines (hunk @@ offsets do not match the actual file content)
   - Whitespace or indentation mismatch in context lines
   - The context lines no longer match the current file (stale diff)
   - Missing or extra blank lines
+  - The feature/function you're patching doesn't exist yet in this older version
 
-Output ONLY the corrected unified diff patch. No explanation. No markdown.
+Rules:
+  - Use ONLY line numbers and context lines from the actual file content provided
+  - If the file you tried to patch is not shown in "Actual File Contents", pick a DIFFERENT file
+  - Output ONLY the corrected unified diff patch. No explanation. No markdown.
 """
 
 SYSTEM_TEST_REPAIR = """\
@@ -237,11 +248,19 @@ Original (broken) patch:
 {bad_patch}
 ```
 
-Eidon context for the relevant files:
+## Actual File Contents (checked-out base commit — YOUR PATCH MUST MATCH THESE EXACTLY)
 
+{actual_files}
+
+---
+
+Eidon context:
 {eidon_context}
 
 Output the corrected unified diff patch. Output ONLY the raw patch.
+Your context lines MUST come verbatim from the "Actual File Contents" above.
+Count line numbers from the actual file content — NOT from Eidon context or the old patch.
+If the function/API you tried to patch doesn't exist in the actual file, pick a DIFFERENT approach.
 """
 
 
@@ -629,45 +648,78 @@ class EidonAgent:
             test_patch = test_patch[:4000] + "\n... (truncated)"
 
         # Extract actual file contents from the checked-out repo.
-        # Scan eidon_context + test_patch + problem_statement for .py paths.
+        # Collect actual file contents from the checked-out repo.
+        # Priority order:
+        #   1. "--- a/" diff headers from Eidon context (highest priority — these are the files Eidon ranked)
+        #   2. Source files derived from test file paths in test_patch (e.g. tests/test_foo.py → core/foo.py)
+        #   3. All other .py mentions in context + problem_statement
         actual_files = ""
         if repo_dir:
-            all_text = (eidon_context or "") + "\n" + task.get("test_patch", "") + "\n" + task.get("problem_statement", "")
-            # Two patterns: "--- a/" / "File:" headers (Eidon format), then general path pattern
-            mentioned = re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/|File:\s*)(\S+\.py)', all_text)
-            mentioned += re.findall(r'\b([\w/.-]+\.py)\b', all_text)
-            # From test paths "pkg/tests/test_foo.py", derive "pkg/core/foo.py"
-            expanded = list(mentioned)
-            for p in mentioned:
+            eidon_text = eidon_context or ""
+            test_patch_text = task.get("test_patch", "") or ""
+            problem_text = task.get("problem_statement", "") or ""
+            all_text = eidon_text + "\n" + test_patch_text + "\n" + problem_text
+
+            # Priority 1: "--- a/" headers from Eidon context (source files Eidon analyzed)
+            priority1 = re.findall(r'(?:^|\n)---\s+a/(\S+\.py)', eidon_text)
+            # Also pick up "File: pkg/foo.py" style Eidon headers
+            priority1 += re.findall(r'(?:^|\n)File:\s*(\S+\.py)', eidon_text)
+
+            # Priority 2: derive source file from test file in test_patch
+            test_files = re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/)(\S+\.py)', test_patch_text)
+            priority2 = []
+            for p in test_files:
                 parts = p.replace('\\', '/').split('/')
                 fname = parts[-1]
                 if fname.startswith('test_') and len(parts) >= 2:
                     src_name = fname[5:]  # strip "test_" prefix
                     pkg = parts[0]
-                    expanded += ['{}/core/{}'.format(pkg, src_name),
-                                 '{}/{}'.format(pkg, src_name)]
+                    priority2 += ['{}/core/{}'.format(pkg, src_name),
+                                  '{}/{}'.format(pkg, src_name),
+                                  '{}/ops/{}'.format(pkg, src_name),
+                                  '{}/backends/{}'.format(pkg, src_name)]
+
+            # Priority 3: everything else
+            priority3 = re.findall(r'\b([\w/.-]+\.py)\b', all_text)
+
+            ordered = priority1 + priority2 + priority3
             seen = set()
             file_sections = []
             total_chars = 0
-            for rel in expanded:
+            for rel in ordered:
                 rel = rel.strip('/')
-                # Skip bare filenames with no directory component
-                if rel in seen or '/' not in rel:
+                # Skip bare filenames (no directory) and test files
+                if '/' not in rel or rel in seen:
+                    continue
+                # Don't inject test files (model shouldn't patch them)
+                basename = rel.split('/')[-1]
+                if basename.startswith('test_') or basename.startswith('conftest'):
+                    seen.add(rel)
                     continue
                 seen.add(rel)
                 full = Path(repo_dir) / rel
-                if full.exists() and full.stat().st_size < 200_000:
+                if not full.exists():
+                    continue
+                fsize = full.stat().st_size
+                if fsize > 300_000:
+                    # File too large — inject a truncated version with a note
+                    try:
+                        content = full.read_text(errors='replace')[:80_000]
+                        section = "### {} (TRUNCATED — first 80K chars only)\n```python\n{}\n```".format(rel, content)
+                    except Exception:
+                        continue
+                else:
                     try:
                         content = full.read_text(errors='replace')
                         section = "### {}\n```python\n{}\n```".format(rel, content)
-                        total_chars += len(section)
-                        if total_chars > 100_000:
-                            break
-                        file_sections.append(section)
                     except Exception:
-                        pass
+                        continue
+                total_chars += len(section)
+                if total_chars > 200_000:
+                    break
+                file_sections.append(section)
             if file_sections:
-                actual_files = "\n\n".join(file_sections[:10])
+                actual_files = "\n\n".join(file_sections[:12])
         if not actual_files:
             actual_files = "(Not available — use Eidon context above for file structure)"
 
@@ -1020,14 +1072,45 @@ class EidonAgent:
 
         return (response.choices[0].message.content or "").strip()
 
-    def repair_patch(self, bad_patch: str, error: str, eidon_context: str, task: dict) -> str:
-        """Ask DeepSeek to repair a patch that failed git apply --check."""
+    def repair_patch(self, bad_patch: str, error: str, eidon_context: str, task: dict, repo_dir: str = "") -> str:
+        """Ask the model to repair a patch that failed git apply --check."""
         print("  [repair] git apply failed: {}".format(error[:120]))
-        print("  [repair] Asking DeepSeek to repair...")
+        print("  [repair] Asking {} to repair...".format(MODEL_REPAIR))
+
+        # Build actual file content for the repair prompt.
+        # Extract file paths from: (a) the error message, (b) the bad patch headers.
+        actual_files_repair = "(Not available)"
+        if repo_dir:
+            # Parse failing file from error e.g. "patch failed: xarray/core/dataarray.py:3085"
+            err_files = re.findall(r'patch failed:\s*([\w/.-]+\.py)', error)
+            err_files += re.findall(r'error:.*?([\w/.-]+\.py)', error)
+            # Also grab all files from the patch headers
+            patch_files = re.findall(r'(?:^|\n)---\s+a/(\S+\.py)', bad_patch)
+            patch_files += re.findall(r'(?:^|\n)\+\+\+\s+b/(\S+\.py)', bad_patch)
+            all_repair_files = list(dict.fromkeys(err_files + patch_files))  # deduplicate, preserve order
+            sections = []
+            for rel in all_repair_files:
+                rel = rel.strip('/')
+                full = Path(repo_dir) / rel
+                if not full.exists():
+                    continue
+                fsize = full.stat().st_size
+                try:
+                    if fsize > 300_000:
+                        content = full.read_text(errors='replace')[:80_000]
+                        sections.append("### {} (TRUNCATED — first 80K chars)\n```python\n{}\n```".format(rel, content))
+                    else:
+                        content = full.read_text(errors='replace')
+                        sections.append("### {}\n```python\n{}\n```".format(rel, content))
+                except Exception:
+                    pass
+            if sections:
+                actual_files_repair = "\n\n".join(sections)
 
         user_content = REPAIR_TEMPLATE.format(
             error=error,
             bad_patch=bad_patch,
+            actual_files=actual_files_repair,
             eidon_context=eidon_context or "(no context)",
         )
 
@@ -1250,7 +1333,7 @@ class EidonAgent:
                 break
             if attempt < 1:
                 print("  [debug] corrupt patch (first 600 chars): {}".format(repr(patch[:600])))
-                repaired = self.repair_patch(patch, err, eidon_context, task)
+                repaired = self.repair_patch(patch, err, eidon_context, task, repo_dir)
                 patch    = self.extract_patch(repaired)
                 patch    = self._fix_hunk_line_numbers(patch, repo_dir)
             else:
