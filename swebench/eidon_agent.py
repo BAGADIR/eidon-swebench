@@ -1406,7 +1406,7 @@ def _save_checkpoint(predictions):
 
 # ── Main benchmark runner ─────────────────────────────────────────────────────
 
-def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
+def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None, retry_ids=None):
     agent = EidonAgent(cache_dir=cache_dir)
 
     predictions, done_ids = _load_checkpoint()
@@ -1415,7 +1415,19 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None):
     ds    = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
     tasks = list(ds)
 
-    if instance_filter:
+    # Support retry of specific instance IDs (from file or env var)
+    _retry_set = None
+    _retry_ids_file = retry_ids or os.environ.get("RETRY_IDS_FILE")
+    if _retry_ids_file:
+        with open(_retry_ids_file) as _f:
+            _retry_set = set(json.load(_f))
+        print("[bench] RETRY mode: {} target IDs from {}".format(len(_retry_set), _retry_ids_file))
+
+    if _retry_set:
+        tasks = [t for t in tasks if t["instance_id"] in _retry_set]
+        # Remove from done_ids so we re-run them even if already checkpointed
+        done_ids -= _retry_set
+    elif instance_filter:
         tasks = [t for t in tasks if t["instance_id"] == instance_filter]
     else:
         if offset:
@@ -1522,6 +1534,7 @@ def main():
     parser.add_argument("--tasks",      default="all",  help="Number of tasks or 'all'")
     parser.add_argument("--offset",     type=int, default=0, help="Task offset for sharding")
     parser.add_argument("--instance",   default=None,   help="Run a single task by instance_id")
+    parser.add_argument("--retry-ids",  default=None,   help="JSON file with list of instance_ids to retry")
     parser.add_argument("--cache-dir",  default=None,   help="Persistent cache dir for analyzed repos")
     args = parser.parse_args()
 
@@ -1533,6 +1546,7 @@ def main():
         instance_filter=args.instance,
         offset=args.offset,
         cache_dir=args.cache_dir,
+        retry_ids=args.retry_ids,
     )
 
 
