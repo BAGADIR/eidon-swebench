@@ -633,24 +633,26 @@ class EidonAgent:
         actual_files = ""
         if repo_dir:
             all_text = (eidon_context or "") + "\n" + task.get("test_patch", "") + "\n" + task.get("problem_statement", "")
-            mentioned = re.findall(r'\b([\w][\w/.-]*/[\w.-]+\.py)\b', all_text)
-            # From test paths like "pkg/tests/test_foo.py", also try "pkg/core/foo.py"
+            # Two patterns: "--- a/" / "File:" headers (Eidon format), then general path pattern
+            mentioned = re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/|File:\s*)(\S+\.py)', all_text)
+            mentioned += re.findall(r'\b([\w/.-]+\.py)\b', all_text)
+            # From test paths "pkg/tests/test_foo.py", derive "pkg/core/foo.py"
             expanded = list(mentioned)
             for p in mentioned:
                 parts = p.replace('\\', '/').split('/')
                 fname = parts[-1]
-                if fname.startswith('test_'):
+                if fname.startswith('test_') and len(parts) >= 2:
                     src_name = fname[5:]  # strip "test_" prefix
-                    pkg = parts[0] if parts else ''
-                    if pkg:
-                        expanded += ['{}/core/{}'.format(pkg, src_name),
-                                     '{}/{}'.format(pkg, src_name)]
+                    pkg = parts[0]
+                    expanded += ['{}/core/{}'.format(pkg, src_name),
+                                 '{}/{}'.format(pkg, src_name)]
             seen = set()
             file_sections = []
             total_chars = 0
             for rel in expanded:
                 rel = rel.strip('/')
-                if rel in seen:
+                # Skip bare filenames with no directory component
+                if rel in seen or '/' not in rel:
                     continue
                 seen.add(rel)
                 full = Path(repo_dir) / rel
@@ -762,7 +764,9 @@ class EidonAgent:
             return file_cache[rel_path]
 
         def find_block(search_lines, file_lines, hint_line=0):
-            """Return 0-based index of search_lines in file_lines, or None."""
+            """Return 0-based index of search_lines in file_lines, or None.
+            Falls back to removed-lines-only search when full context search fails.
+            """
             # Filter blank-only lines at edges
             trimmed = [l.rstrip() for l in search_lines]
             while trimmed and not trimmed[0].strip():
@@ -771,25 +775,48 @@ class EidonAgent:
                 trimmed = trimmed[:-1]
             if not trimmed:
                 return None
-            n = len(trimmed)
-            file_stripped = [l.rstrip() for l in file_lines]
-            matches = []
-            for i in range(len(file_stripped) - n + 1):
-                if file_stripped[i:i+n] == trimmed:
-                    matches.append(i)
-            if not matches:
-                # Retry with leading-whitespace normalised (indent drift)
-                norm = [l.strip() for l in trimmed]
-                norm_file = [l.strip() for l in file_stripped]
-                for i in range(len(norm_file) - n + 1):
-                    if norm_file[i:i+n] == norm:
+
+            def search(needles, haystack, hint):
+                n = len(needles)
+                if n == 0:
+                    return None
+                matches = []
+                for i in range(len(haystack) - n + 1):
+                    if haystack[i:i+n] == needles:
                         matches.append(i)
-            if not matches:
-                return None
-            if len(matches) == 1:
-                return matches[0]
-            # Disambiguate: pick closest to the hint
-            return min(matches, key=lambda x: abs(x - hint_line))
+                if not matches:
+                    return None
+                return matches[0] if len(matches) == 1 else min(matches, key=lambda x: abs(x - hint))
+
+            file_stripped = [l.rstrip() for l in file_lines]
+
+            # Pass 1: exact match of all context+removed lines
+            found = search(trimmed, file_stripped, hint_line)
+            if found is not None:
+                return found
+
+            # Pass 2: whitespace-normalised match
+            norm = [l.strip() for l in trimmed]
+            norm_file = [l.strip() for l in file_stripped]
+            found = search(norm, norm_file, hint_line)
+            if found is not None:
+                return found
+
+            # Pass 3: search only for the removed (-) lines from the original hunk
+            # (context lines may differ between commits; removed lines are more stable)
+            removed_only = [l.rstrip() for l in search_lines
+                            if l.startswith('-') or (len(l) > 1 and l[0] == '-')]
+            removed_only = [l for l in removed_only if l.strip()]
+            if removed_only:
+                found = search(removed_only, file_stripped, hint_line)
+                if found is not None:
+                    return found
+                norm_removed = [l.strip() for l in removed_only]
+                found = search(norm_removed, norm_file, hint_line)
+                if found is not None:
+                    return found
+
+            return None
 
         out_lines = []
         current_file = ""
