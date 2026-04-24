@@ -23,6 +23,10 @@ on:
         description: "Global task offset (skip first N tasks, useful for testing non-astropy tasks)"
         required: false
         default: "0"
+      model:
+        description: "LLM model for patch+repair (e.g. gemini-2.5-pro, gemini-2.5-flash)"
+        required: false
+        default: "gemini-2.5-pro"
 
 jobs:
 
@@ -182,8 +186,8 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL_PATCH: "gemini-2.5-pro"
-          LLM_MODEL_REPAIR: "gemini-2.5-pro"
+          LLM_MODEL_PATCH: ${{ github.event.inputs.model || 'gemini-2.5-pro' }}
+          LLM_MODEL_REPAIR: ${{ github.event.inputs.model || 'gemini-2.5-pro' }}
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
           EIDON_TASK_TIMEOUT: "1800"
           PYTHONUNBUFFERED: "1"
