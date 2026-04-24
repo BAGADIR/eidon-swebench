@@ -71,9 +71,9 @@ jobs:
       - name: Run eidon analyze
         env:
           EIDON_LLM_PROVIDER: "openai"
-          EIDON_LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          EIDON_LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          EIDON_LLM_MODEL: "gemini-flash-latest"
+          EIDON_LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          EIDON_LLM_BASE_URL: "https://openrouter.ai/api/v1"
+          EIDON_LLM_MODEL: "google/gemini-2.5-flash"
           EIDON_LLM_CONCURRENCY: "8"
           EIDON_PHASE7_FILE_LIMIT: "200"
           EIDON_MAX_RECHECK_CYCLES: "0"
@@ -183,11 +183,11 @@ jobs:
       - name: Run benchmark shard ${{ matrix.shard }}
         working-directory: swebench
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LLM_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai/"
-          LLM_MODEL_PATCH: ${{ github.event.inputs.model || 'gemini-2.5-pro' }}
-          LLM_MODEL_REPAIR: ${{ github.event.inputs.model || 'gemini-2.5-pro' }}
+          DEEPSEEK_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_BASE_URL: "https://openrouter.ai/api/v1"
+          LLM_MODEL_PATCH: ${{ github.event.inputs.model || 'google/gemini-2.5-flash' }}
+          LLM_MODEL_REPAIR: ${{ github.event.inputs.model || 'google/gemini-2.5-flash' }}
           EIDON_PRELOAD_DIR: /tmp/eidon-preload
           EIDON_TASK_TIMEOUT: "1800"
           PYTHONUNBUFFERED: "1"
@@ -278,3 +278,5 @@ jobs:
           echo "sb-cli submit --predictions predictions.json --split verified"
           # Uncomment when ready:
           # sb-cli submit --predictions predictions.json --split verified
+
+
