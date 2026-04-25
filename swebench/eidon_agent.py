@@ -59,6 +59,7 @@ Usage:
 import os
 import sys
 import json
+import difflib
 import subprocess
 import tempfile
 import shutil
@@ -245,6 +246,58 @@ Previous broken patch (for hints only, do not reuse its hunk headers blindly):
 ```
 
 Generate a fresh minimal unified diff from scratch. Output ONLY the raw patch.
+"""
+
+SYSTEM_FILE_REWRITE = """\
+You are an expert software engineer. Previous diff-formatting attempts failed.
+
+You will be given exact file contents from the checked-out base commit.
+Do NOT output a unified diff.
+Instead, output one or more full-file rewrite blocks in EXACTLY this format:
+
+===FILE:path/to/file.py===
+<full new file content>
+===END FILE===
+
+Rules:
+    - Output ONLY rewrite blocks. No prose. No markdown fences.
+    - Use ONLY file paths shown in the "Actual File Contents" section.
+    - Each block must contain the ENTIRE final file content after your fix.
+    - Only include files that actually changed.
+    - Keep the change minimal and directly tied to the issue/tests.
+    - If you cannot produce a confident fix from the shown files, output nothing.
+"""
+
+FILE_REWRITE_TEMPLATE = """\
+The previous patch/apply loop failed repeatedly.
+
+Last apply error:
+```
+{error}
+```
+
+Previous broken patch (for hints only, do not reuse its hunk headers blindly):
+```diff
+{bad_patch}
+```
+
+## Actual File Contents (checked-out base commit)
+
+{actual_files}
+
+## Issue
+{problem_statement}
+
+## Tests that must pass (FAIL_TO_PASS)
+{fail_to_pass}
+
+## Test patch
+```python
+{test_patch}
+```
+
+Rewrite the full contents of the minimal set of files needed to fix the bug.
+Output ONLY rewrite blocks in the required format.
 """
 
 PATCH_TEMPLATE = """\
@@ -1236,6 +1289,132 @@ class EidonAgent:
 
         return "\n\n".join(sections) if sections else "(Not available)"
 
+    def _candidate_patch_files(self, error: str, bad_patch: str) -> list:
+        """Infer a small set of likely source files from git-apply errors and patch headers."""
+        err_files = re.findall(r'patch failed:\s*([\w/.-]+\.py)', error)
+        err_files += re.findall(r'error:.*?([\w/.-]+\.py)', error)
+        patch_files = re.findall(r'(?:^|\n)---\s+a/(\S+\.py)', bad_patch)
+        patch_files += re.findall(r'(?:^|\n)\+\+\+\s+b/(\S+\.py)', bad_patch)
+        return list(dict.fromkeys(err_files + patch_files))
+
+    def _extract_rewritten_files(self, raw: str) -> dict:
+        """Parse full-file rewrite blocks returned by the model."""
+        s = (raw or "").strip()
+        if not s:
+            return {}
+
+        fenced = re.search(r"```(?:text|python|py)?\n(.*?)```", s, re.DOTALL)
+        if fenced:
+            s = fenced.group(1).strip()
+
+        pattern = re.compile(
+            r"^===FILE:(.+?)===\r?\n(.*?)\r?\n===END FILE===\s*",
+            re.DOTALL | re.MULTILINE,
+        )
+        rewrites = {}
+        for match in pattern.finditer(s):
+            path = match.group(1).strip().replace('\\', '/')
+            content = match.group(2)
+            if path:
+                rewrites[path] = content
+        return rewrites
+
+    def _build_patch_from_rewrites(self, repo_dir: str, rewritten_files: dict) -> str:
+        """Create a unified diff locally from full rewritten file contents."""
+        if not repo_dir or not rewritten_files:
+            return ""
+
+        repo_path = Path(repo_dir)
+        chunks = []
+        for rel_path, new_content in rewritten_files.items():
+            rel_path = rel_path.strip().lstrip('./').replace('\\', '/')
+            full_path = repo_path / rel_path
+            if not full_path.exists() or not full_path.is_file():
+                print("  [rewrite] Skipping unknown file {}".format(rel_path))
+                continue
+            try:
+                old_content = full_path.read_text(errors='replace')
+            except Exception:
+                continue
+
+            if old_content == new_content:
+                continue
+
+            diff_lines = difflib.unified_diff(
+                old_content.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile="a/{}".format(rel_path),
+                tofile="b/{}".format(rel_path),
+                n=3,
+            )
+            diff_text = "".join(diff_lines)
+            if diff_text:
+                if not diff_text.endswith("\n"):
+                    diff_text += "\n"
+                chunks.append(diff_text)
+
+        return "".join(chunks)
+
+    def rewrite_rescue(self, bad_patch: str, error: str, task: dict, repo_dir: str = "") -> str:
+        """Ask the model for full rewritten files, then build a local diff from them."""
+        print("  [rewrite] Asking {} for full-file rewrite fallback...".format(MODEL_REPAIR))
+
+        candidate_files = self._candidate_patch_files(error, bad_patch)
+        actual_files = self._collect_actual_file_sections(repo_dir, candidate_files, limit=4)
+        if actual_files == "(Not available)":
+            print("  [rewrite] No candidate files available for rewrite fallback")
+            return ""
+
+        fail_to_pass = task.get("FAIL_TO_PASS", [])
+        if isinstance(fail_to_pass, str):
+            try:
+                fail_to_pass = json.loads(fail_to_pass)
+            except Exception:
+                fail_to_pass = [fail_to_pass]
+
+        test_patch = (task.get("test_patch", "") or "").strip()
+        if len(test_patch) > 4000:
+            test_patch = test_patch[:4000] + "\n... (truncated)"
+
+        user_content = FILE_REWRITE_TEMPLATE.format(
+            error=error,
+            bad_patch=bad_patch,
+            actual_files=actual_files,
+            problem_statement=task.get("problem_statement", "")[:3000],
+            fail_to_pass="\n".join(fail_to_pass[:10]) if fail_to_pass else "(not specified)",
+            test_patch=test_patch if test_patch else "(not provided)",
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=MODEL_REPAIR,
+                max_tokens=MAX_PATCH_TOKENS,
+                messages=[
+                    {"role": "system", "content": SYSTEM_FILE_REWRITE},
+                    {"role": "user",   "content": user_content},
+                ],
+            )
+        except Exception as e:
+            print("  [rewrite] API error: {}".format(e))
+            return ""
+
+        if response.usage:
+            self.total_input_tokens += response.usage.prompt_tokens
+            self.total_output_tokens += response.usage.completion_tokens
+
+        raw = (response.choices[0].message.content or "").strip()
+        rewritten_files = self._extract_rewritten_files(raw)
+        if not rewritten_files:
+            print("  [rewrite] Could not parse rewritten files (raw[:400]: {})".format(repr(raw[:400])))
+            return ""
+
+        patch = self._build_patch_from_rewrites(repo_dir, rewritten_files)
+        if patch.strip():
+            print("  [rewrite] Built local diff for {} file(s)".format(len(rewritten_files)))
+        else:
+            print("  [rewrite] Rewrite response produced no local diff")
+        return patch
+
     def rescue_patch(self, bad_patch: str, error: str, task: dict, repo_dir: str = "") -> str:
         """Generate a fresh patch from scratch after repair attempts are exhausted."""
         print("  [rescue] Asking {} for a fresh patch from exact files...".format(MODEL_REPAIR))
@@ -1247,13 +1426,9 @@ class EidonAgent:
             except Exception:
                 fail_to_pass = [fail_to_pass]
 
-        err_files = re.findall(r'patch failed:\s*([\w/.-]+\.py)', error)
-        err_files += re.findall(r'error:.*?([\w/.-]+\.py)', error)
-        patch_files = re.findall(r'(?:^|\n)---\s+a/(\S+\.py)', bad_patch)
-        patch_files += re.findall(r'(?:^|\n)\+\+\+\s+b/(\S+\.py)', bad_patch)
         actual_files = self._collect_actual_file_sections(
             repo_dir,
-            list(dict.fromkeys(err_files + patch_files)),
+            self._candidate_patch_files(error, bad_patch),
         )
 
         test_patch = (task.get("test_patch", "") or "").strip()
@@ -1566,8 +1741,21 @@ class EidonAgent:
                     print("  [rescue] Patch applies cleanly")
                 else:
                     print("  [rescue] Patch still invalid: {}".format((rescue_err or last_err)[:120]))
-                    print("  [verify] Giving up for now -- submitting empty")
-                    patch = ""
+                    rewrite_patch = self.rewrite_rescue(patch, rescue_err or last_err, task, repo_dir)
+                    if rewrite_patch.strip():
+                        rewrite_patch = self._remap_patch_paths(rewrite_patch, repo_dir)
+                        rewrite_patch = self._fix_hunk_line_numbers(rewrite_patch, repo_dir)
+                        rewrite_ok, rewrite_err = self.verify_patch(rewrite_patch, repo_dir)
+                        if rewrite_ok:
+                            print("  [rewrite] Local diff applies cleanly")
+                            patch = rewrite_patch
+                        else:
+                            print("  [rewrite] Local diff still invalid: {}".format((rewrite_err or rescue_err or last_err)[:120]))
+                            patch = ""
+                    else:
+                        patch = ""
+                    if not patch:
+                        print("  [verify] Giving up for now -- submitting empty")
 
         # Stage 5: Test execution loop (run FAIL_TO_PASS, re-patch on failure)
         if patch.strip() and fail_to_pass:
