@@ -1658,7 +1658,7 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None, retry_ids=
         done_ids -= _retry_set
     elif instance_filter:
         tasks = [t for t in tasks if t["instance_id"] == instance_filter]
-    else:
+    if not instance_filter:
         if offset:
             tasks = tasks[offset:]
         if str(num_tasks) != "all" and num_tasks != -1:
