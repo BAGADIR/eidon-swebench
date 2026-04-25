@@ -1122,8 +1122,8 @@ class EidonAgent:
 
     def test_repair(self, current_patch: str, pytest_output: str,
                     eidon_context: str, task: dict) -> str:
-        """Ask DeepSeek to fix the patch based on actual test failures."""
-        print("  [test-repair] Asking DeepSeek to fix based on test output...")
+        """Ask the model to fix the patch based on actual test failures."""
+        print("  [test-repair] Asking {} to fix based on test output...".format(MODEL_REPAIR))
         fail_to_pass = task.get("FAIL_TO_PASS", [])
         if isinstance(fail_to_pass, str):
             try:
