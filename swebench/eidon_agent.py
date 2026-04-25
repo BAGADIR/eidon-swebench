@@ -396,7 +396,7 @@ class EidonMCPClient:
                 "intent": intent,
                 "token_budget": token_budget,
             },
-        }, timeout=180.0)
+        }, timeout=600.0)
 
         if result is None:
             return None
