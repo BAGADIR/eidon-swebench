@@ -601,11 +601,15 @@ class EidonAgent:
             # Use smaller budget for large DBs to reduce graphology query time
             db_path = Path(repo_path) / ".eidon" / "eidon.db"
             db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
-            # Skip MCP entirely for very large DBs — always times out even at 180s
-            if db_mb > 100:
-                print("  [mcp] DB too large ({:.0f}MB) — skipping MCP to avoid timeout".format(db_mb))
-                return ""
-            budget = 2000 if db_mb > 50 else TOKEN_BUDGET
+            # Use smaller budgets for larger DBs to avoid graphology query timeout
+            if db_mb > 200:
+                budget = 500
+            elif db_mb > 100:
+                budget = 1000
+            elif db_mb > 50:
+                budget = 2000
+            else:
+                budget = TOKEN_BUDGET
             print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
                 budget, db_mb))
             start = time.time()
