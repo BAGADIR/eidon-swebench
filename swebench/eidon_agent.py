@@ -93,7 +93,8 @@ MAX_PATCH_TOKENS    = 32000          # max tokens for patch output
 TASK_TIMEOUT        = int(os.environ.get("EIDON_TASK_TIMEOUT", "1800"))  # 30 min per task
 OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
-MODEL_NAME_TAG      = "eidon-mcp-deepseek-reasoner"
+RETRY_IDS_OUTPUT    = os.environ.get("RETRY_IDS_OUTPUT_FILE", "retry_ids_next.json")
+MODEL_NAME_TAG      = "eidon-mcp-{}".format(MODEL_PATCH.replace("/", "-"))
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -175,6 +176,21 @@ that fixes the issue AND makes the failing tests pass.
 Output ONLY the raw unified diff patch. No explanation. No markdown fences.
 """
 
+SYSTEM_RESCUE = """\
+You are an expert software engineer. Previous patch generation and repair
+attempts failed to produce a diff that applies cleanly.
+
+Start over from scratch.
+Ignore all previous line numbers and hunk offsets.
+Use ONLY the exact file contents shown below.
+
+Rules:
+    - Output ONLY a raw unified diff patch. No explanation. No markdown.
+    - Patch ONLY files shown in the "Actual File Contents" section.
+    - Keep the change minimal and directly tied to the issue/tests.
+    - If you cannot produce a valid patch against the shown files, output nothing.
+"""
+
 TEST_REPAIR_TEMPLATE = """\
 Current patch (already applied to repo):
 ```diff
@@ -198,6 +214,37 @@ Eidon context for modified files (current state after patch):
 {fail_to_pass}
 
 Generate a NEW patch from the ORIGINAL unmodified file. Output ONLY the raw unified diff.
+"""
+
+RESCUE_TEMPLATE = """\
+The previous patch/apply loop failed repeatedly.
+
+Last apply error:
+```
+{error}
+```
+
+Previous broken patch (for hints only, do not reuse its hunk headers blindly):
+```diff
+{bad_patch}
+```
+
+## Actual File Contents (checked-out base commit)
+
+{actual_files}
+
+## Issue
+{problem_statement}
+
+## Tests that must pass (FAIL_TO_PASS)
+{fail_to_pass}
+
+## Test patch
+```python
+{test_patch}
+```
+
+Generate a fresh minimal unified diff from scratch. Output ONLY the raw patch.
 """
 
 PATCH_TEMPLATE = """\
@@ -1158,6 +1205,89 @@ class EidonAgent:
 
         return (response.choices[0].message.content or "").strip()
 
+    def _collect_actual_file_sections(self, repo_dir: str, rel_paths: list, limit: int = 8) -> str:
+        """Collect exact file contents for a small set of candidate source files."""
+        if not repo_dir or not rel_paths:
+            return "(Not available)"
+
+        sections = []
+        seen = set()
+        for rel in rel_paths:
+            rel = (rel or "").strip().strip('/')
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            full = Path(repo_dir) / rel
+            if not full.exists() or not full.is_file():
+                continue
+            try:
+                content = full.read_text(errors='replace')
+            except Exception:
+                continue
+
+            if len(content) > 80_000:
+                content = content[:80_000]
+                sections.append("### {} (TRUNCATED — first 80K chars)\n```python\n{}\n```".format(rel, content))
+            else:
+                sections.append("### {}\n```python\n{}\n```".format(rel, content))
+
+            if len(sections) >= limit:
+                break
+
+        return "\n\n".join(sections) if sections else "(Not available)"
+
+    def rescue_patch(self, bad_patch: str, error: str, task: dict, repo_dir: str = "") -> str:
+        """Generate a fresh patch from scratch after repair attempts are exhausted."""
+        print("  [rescue] Asking {} for a fresh patch from exact files...".format(MODEL_REPAIR))
+
+        fail_to_pass = task.get("FAIL_TO_PASS", [])
+        if isinstance(fail_to_pass, str):
+            try:
+                fail_to_pass = json.loads(fail_to_pass)
+            except Exception:
+                fail_to_pass = [fail_to_pass]
+
+        err_files = re.findall(r'patch failed:\s*([\w/.-]+\.py)', error)
+        err_files += re.findall(r'error:.*?([\w/.-]+\.py)', error)
+        patch_files = re.findall(r'(?:^|\n)---\s+a/(\S+\.py)', bad_patch)
+        patch_files += re.findall(r'(?:^|\n)\+\+\+\s+b/(\S+\.py)', bad_patch)
+        actual_files = self._collect_actual_file_sections(
+            repo_dir,
+            list(dict.fromkeys(err_files + patch_files)),
+        )
+
+        test_patch = (task.get("test_patch", "") or "").strip()
+        if len(test_patch) > 4000:
+            test_patch = test_patch[:4000] + "\n... (truncated)"
+
+        user_content = RESCUE_TEMPLATE.format(
+            error=error,
+            bad_patch=bad_patch,
+            actual_files=actual_files,
+            problem_statement=task.get("problem_statement", "")[:3000],
+            fail_to_pass="\n".join(fail_to_pass[:10]) if fail_to_pass else "(not specified)",
+            test_patch=test_patch if test_patch else "(not provided)",
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=MODEL_REPAIR,
+                max_tokens=MAX_PATCH_TOKENS,
+                messages=[
+                    {"role": "system", "content": SYSTEM_RESCUE},
+                    {"role": "user",   "content": user_content},
+                ],
+            )
+        except Exception as e:
+            print("  [rescue] API error: {}".format(e))
+            return bad_patch
+
+        if response.usage:
+            self.total_input_tokens += response.usage.prompt_tokens
+            self.total_output_tokens += response.usage.completion_tokens
+
+        return (response.choices[0].message.content or "").strip()
+
     def repair_patch(self, bad_patch: str, error: str, eidon_context: str, task: dict, repo_dir: str = "") -> str:
         """Ask the model to repair a patch that failed git apply --check."""
         print("  [repair] git apply failed: {}".format(error[:120]))
@@ -1406,8 +1536,10 @@ class EidonAgent:
         patch = self._fix_hunk_line_numbers(patch, repo_dir)
 
         MAX_REPAIR_ATTEMPTS = 6
+        last_err = ""
         for attempt in range(MAX_REPAIR_ATTEMPTS + 1):
             ok, err = self.verify_patch(patch, repo_dir)
+            last_err = err
             if ok:
                 # Sanity check: reject patches that only touch irrelevant config/meta files
                 patched_files = [l[6:] for l in patch.splitlines() if l.startswith("+++ b/")]
@@ -1424,8 +1556,18 @@ class EidonAgent:
                 patch    = self.extract_patch(repaired)
                 patch    = self._fix_hunk_line_numbers(patch, repo_dir)
             else:
-                print("  [verify] Patch still invalid after {} git-repair attempts -- submitting empty".format(MAX_REPAIR_ATTEMPTS))
-                patch = ""
+                print("  [verify] Patch still invalid after {} git-repair attempts -- trying rescue".format(MAX_REPAIR_ATTEMPTS))
+                rescued = self.rescue_patch(patch, err, task, repo_dir)
+                patch = self.extract_patch(rescued)
+                patch = self._remap_patch_paths(patch, repo_dir)
+                patch = self._fix_hunk_line_numbers(patch, repo_dir)
+                ok, rescue_err = self.verify_patch(patch, repo_dir)
+                if ok:
+                    print("  [rescue] Patch applies cleanly")
+                else:
+                    print("  [rescue] Patch still invalid: {}".format((rescue_err or last_err)[:120]))
+                    print("  [verify] Giving up for now -- submitting empty")
+                    patch = ""
 
         # Stage 5: Test execution loop (run FAIL_TO_PASS, re-patch on failure)
         if patch.strip() and fail_to_pass:
@@ -1604,7 +1746,15 @@ def run_benchmark(num_tasks, instance_filter, offset, cache_dir=None, retry_ids=
     with open(OUTPUT_FILE, "w") as f:
         json.dump(predictions, f, indent=2)
 
+    retry_ids_next = [
+        p["instance_id"] for p in predictions
+        if not (p.get("model_patch", "") or "").strip()
+    ]
+    with open(RETRY_IDS_OUTPUT, "w") as f:
+        json.dump(retry_ids_next, f, indent=2)
+
     print("\n[done] {} predictions -> {}".format(len(predictions), OUTPUT_FILE))
+    print("[retry] {} empty predictions -> {}".format(len(retry_ids_next), RETRY_IDS_OUTPUT))
     print("[cost] Total: ${:.4f}".format(agent.total_cost))
     print("[stats] {}/{} tasks produced patches".format(
         agent.successful_tasks, agent.total_tasks))
