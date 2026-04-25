@@ -85,6 +85,10 @@ MODEL_REPAIR        = os.environ.get("LLM_MODEL_REPAIR", "deepseek-reasoner")
 
 EIDON_BIN           = "eidon"        # installed via: npm install -g eidoncore
 TOKEN_BUDGET        = 8000           # eidon_encoding token budget
+
+# Global MCP server cache: repo_path -> EidonMCPClient
+# Keeps the server alive across tasks for the same repo (avoids reloading 200MB DB each time)
+_mcp_cache: dict = {}
 MAX_PATCH_TOKENS    = 32000          # max tokens for patch output
 TASK_TIMEOUT        = int(os.environ.get("EIDON_TASK_TIMEOUT", "1800"))  # 30 min per task
 OUTPUT_FILE         = "predictions.json"
@@ -585,38 +589,44 @@ class EidonAgent:
         Start `eidon mcp --repo <path>` as a stdio subprocess and call
         eidon_encoding(intent=problem_statement).
 
-        Eidon performs HNSW vector search on the issue description and returns
-        the semantically closest files with full source + graph context.
-        This IS the localization — no separate DeepSeek localize call needed.
+        The MCP server is cached per repo_path — started once and reused across
+        all tasks for the same repo, so large DBs (200MB django etc.) only pay
+        the graphology initialization cost once.
         """
-        print("  [mcp] Starting Eidon MCP server...")
-        mcp = EidonMCPClient(repo_path)
-        if not mcp.start():
-            print("  [mcp] Failed to start MCP server")
-            return ""
+        global _mcp_cache
 
-        try:
-            # Truncate intent to avoid overwhelming the search query
-            intent = problem_statement[:1000].strip()
-            db_path = Path(repo_path) / ".eidon" / "eidon.db"
-            db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
-            budget = TOKEN_BUDGET
-            print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
-                budget, db_mb))
-            start = time.time()
-            context = mcp.call_encoding(intent=intent, token_budget=budget)
-            elapsed = time.time() - start
+        db_path = Path(repo_path) / ".eidon" / "eidon.db"
+        db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
 
-            if context:
-                print("  [mcp] Got {:,} chars ({:,} est. tokens) in {:.1f}s".format(
-                    len(context), len(context) // 4, elapsed))
-            else:
-                print("  [mcp] eidon_encoding returned empty context")
-                context = ""
+        # Reuse cached server if alive
+        mcp = _mcp_cache.get(repo_path)
+        if mcp is None or mcp._proc is None or mcp._proc.poll() is not None:
+            print("  [mcp] Starting Eidon MCP server... (db={:.0f}MB)".format(db_mb))
+            mcp = EidonMCPClient(repo_path)
+            if not mcp.start():
+                print("  [mcp] Failed to start MCP server")
+                return ""
+            _mcp_cache[repo_path] = mcp
+        else:
+            print("  [mcp] Reusing cached MCP server (db={:.0f}MB)".format(db_mb))
 
-            return context
-        finally:
-            mcp.stop()
+        # Truncate intent to avoid overwhelming the search query
+        intent = problem_statement[:1000].strip()
+        budget = TOKEN_BUDGET
+        print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
+            budget, db_mb))
+        start = time.time()
+        context = mcp.call_encoding(intent=intent, token_budget=budget)
+        elapsed = time.time() - start
+
+        if context:
+            print("  [mcp] Got {:,} chars ({:,} est. tokens) in {:.1f}s".format(
+                len(context), len(context) // 4, elapsed))
+        else:
+            print("  [mcp] eidon_encoding returned empty context")
+            context = ""
+
+        return context
 
     # ── Stage 3: Generate patch ───────────────────────────────────────────────
 
