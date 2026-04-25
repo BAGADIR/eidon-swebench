@@ -387,7 +387,7 @@ class EidonMCPClient:
         print("  [mcp] Timeout waiting for response to {}".format(method))
         return None
 
-    def call_encoding(self, intent: str, token_budget: int = TOKEN_BUDGET) -> Optional[str]:
+    def call_encoding(self, intent: str, token_budget: int = TOKEN_BUDGET, timeout: float = 600.0) -> Optional[str]:
         """
         Call eidon_encoding(intent=...) — the core MCP call.
         Eidon performs HNSW semantic search on `intent` (the issue description)
@@ -400,7 +400,7 @@ class EidonMCPClient:
                 "intent": intent,
                 "token_budget": token_budget,
             },
-        }, timeout=600.0)
+        }, timeout=timeout)
 
         if result is None:
             return None
@@ -598,7 +598,19 @@ class EidonAgent:
         db_path = Path(repo_path) / ".eidon" / "eidon.db"
         db_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0
 
-        # Reuse cached server if alive
+        # For large DBs, reduce token_budget so eidon fetches/serializes fewer nodes.
+        # This is the main factor affecting eidon_encoding query time on large graphs.
+        # Fewer tokens = fewer top-K results to fetch = faster HNSW result processing.
+        # 2000 tokens still covers the 1-3 relevant files needed for a typical SWE-bench fix.
+        if db_mb > 200:
+            budget = 2000
+            rpc_timeout = 120.0
+        elif db_mb > 100:
+            budget = 3000
+            rpc_timeout = 180.0
+        else:
+            budget = TOKEN_BUDGET
+            rpc_timeout = 600.0
         mcp = _mcp_cache.get(repo_path)
         if mcp is None or mcp._proc is None or mcp._proc.poll() is not None:
             print("  [mcp] Starting Eidon MCP server... (db={:.0f}MB)".format(db_mb))
@@ -612,11 +624,10 @@ class EidonAgent:
 
         # Truncate intent to avoid overwhelming the search query
         intent = problem_statement[:1000].strip()
-        budget = TOKEN_BUDGET
         print("  [mcp] Calling eidon_encoding(intent=..., token_budget={:,})... (db={:.0f}MB)".format(
             budget, db_mb))
         start = time.time()
-        context = mcp.call_encoding(intent=intent, token_budget=budget)
+        context = mcp.call_encoding(intent=intent, token_budget=budget, timeout=rpc_timeout)
         elapsed = time.time() - start
 
         if context:
