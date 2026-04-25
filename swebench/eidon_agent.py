@@ -681,10 +681,32 @@ class EidonAgent:
             # Also pick up "File: pkg/foo.py" style Eidon headers
             priority1 += re.findall(r'(?:^|\n)File:\s*(\S+\.py)', eidon_text)
 
-            # Priority 2: derive source file from test file in test_patch
-            test_files = re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/)(\S+\.py)', test_patch_text)
+            # Priority 2: read the actual test file in the repo and parse its imports
+            # to find the exact source module(s) under test.
+            test_file_paths = re.findall(r'(?:^|\n)\+\+\+\s+b/((?:tests?|lib/[\w/]+/tests?)/\S+\.py)', test_patch_text)
+            # Also catch any diff header for a test file
+            test_file_paths += re.findall(r'(?:^|\n)---\s+a/((?:tests?|lib/[\w/]+/tests?)/\S+\.py)', test_patch_text)
             priority2 = []
-            for p in test_files:
+            _seen_imports: set = set()
+            for tpath in test_file_paths[:3]:
+                tpath = tpath.lstrip('/')
+                tfull = Path(repo_dir) / tpath
+                if not tfull.exists():
+                    continue
+                try:
+                    tcontent = tfull.read_text(errors='replace')
+                    # Parse "from x.y.z import ..." and "import x.y.z"
+                    mods = re.findall(r'^from\s+([\w.]+)\s+import', tcontent, re.MULTILINE)
+                    mods += re.findall(r'^import\s+([\w.]+)', tcontent, re.MULTILINE)
+                    for mod in mods:
+                        candidate = mod.replace('.', '/') + '.py'
+                        if '/' in candidate and candidate not in _seen_imports:
+                            _seen_imports.add(candidate)
+                            priority2.append(candidate)
+                except Exception:
+                    pass
+            # Also derive from test filename (legacy heuristic as fallback)
+            for p in re.findall(r'(?:^|\n)(?:---\s+a/|\+\+\+\s+b/)(\S+\.py)', test_patch_text):
                 parts = p.replace('\\', '/').split('/')
                 fname = parts[-1]
                 if fname.startswith('test_') and len(parts) >= 2:
@@ -695,8 +717,13 @@ class EidonAgent:
                                   '{}/ops/{}'.format(pkg, src_name),
                                   '{}/backends/{}'.format(pkg, src_name)]
 
-            # Priority 3: everything else
+            # Priority 3: explicit file paths mentioned in text
             priority3 = re.findall(r'\b([\w/.-]+\.py)\b', all_text)
+            # Also convert dot-notation module references (e.g. django.db.models.sql.query)
+            for mod_ref in re.findall(r'\b([\w]+(?:\.[\w]+){2,})\b', all_text):
+                candidate = mod_ref.replace('.', '/') + '.py'
+                if '/' in candidate:
+                    priority3.append(candidate)
 
             ordered = priority1 + priority2 + priority3
             seen = set()
@@ -736,6 +763,49 @@ class EidonAgent:
                 file_sections.append(section)
             if file_sections:
                 actual_files = "\n\n".join(file_sections[:12])
+            else:
+                # Last resort: grep the repo for key identifiers from the problem statement
+                # Extract backtick-quoted names and CamelCase identifiers
+                grep_targets = re.findall(r'`([a-zA-Z_][a-zA-Z0-9_.]+)`', problem_text)
+                grep_targets += re.findall(r'\b([A-Z][a-zA-Z0-9]+(?:Error|Exception|Field|View|Form|Manager|Query))\b', problem_text)
+                grep_seen: set = set()
+                grep_files: list = []
+                for name in grep_targets[:8]:
+                    name = name.split('.')[-1]  # "django.db.models.Q" -> "Q"
+                    if len(name) < 4 or name in grep_seen:
+                        continue
+                    grep_seen.add(name)
+                    try:
+                        r = subprocess.run(
+                            ['grep', '-r', '--include=*.py', '-l',
+                             'def ' + name, '.'],
+                            cwd=repo_dir, capture_output=True, text=True, timeout=8,
+                        )
+                        for gf in r.stdout.strip().splitlines()[:3]:
+                            gf = gf.strip().lstrip('.').lstrip('/')
+                            if gf and '/' in gf and not Path(gf).name.startswith('test_'):
+                                if gf not in seen:
+                                    seen.add(gf)
+                                    grep_files.append(gf)
+                    except Exception:
+                        pass
+                for rel in grep_files[:5]:
+                    full = Path(repo_dir) / rel
+                    if not full.exists():
+                        continue
+                    try:
+                        content = full.read_text(errors='replace')
+                        if len(content) > 300_000:
+                            content = content[:80_000]
+                            section = "### {} (TRUNCATED)\n```python\n{}\n```".format(rel, content)
+                        else:
+                            section = "### {}\n```python\n{}\n```".format(rel, content)
+                        file_sections.append(section)
+                    except Exception:
+                        pass
+                if file_sections:
+                    actual_files = "\n\n".join(file_sections[:8])
+                    print("  [files] grep fallback found {} file(s)".format(len(file_sections)))
         if not actual_files:
             actual_files = "(Not available — use Eidon context above for file structure)"
 
