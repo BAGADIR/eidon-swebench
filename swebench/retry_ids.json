@@ -1,12 +1,10 @@
 [
   "psf__requests-1142",
-  "pytest-dev__pytest-5262",
   "pytest-dev__pytest-5840",
   "pytest-dev__pytest-10051",
   "pytest-dev__pytest-5631",
   "pytest-dev__pytest-10081",
   "pytest-dev__pytest-6197",
-  "pytest-dev__pytest-7324",
   "astropy__astropy-8707",
   "astropy__astropy-8872",
   "sympy__sympy-13877",
