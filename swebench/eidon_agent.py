@@ -90,7 +90,7 @@ TOKEN_BUDGET        = 8000           # eidon_encoding token budget
 # Global MCP server cache: repo_path -> EidonMCPClient
 # Keeps the server alive across tasks for the same repo (avoids reloading 200MB DB each time)
 _mcp_cache: dict = {}
-MAX_PATCH_TOKENS    = 32000          # max tokens for patch output
+MAX_PATCH_TOKENS    = int(os.environ.get("EIDON_MAX_OUTPUT_TOKENS", "8192"))
 TASK_TIMEOUT        = int(os.environ.get("EIDON_TASK_TIMEOUT", "1800"))  # 30 min per task
 OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
@@ -526,6 +526,7 @@ class EidonAgent:
         self.total_output_tokens = 0
         self.total_tasks         = 0
         self.successful_tasks    = 0
+        self._credits_exhausted  = False
 
     @property
     def total_cost(self) -> float:
@@ -539,6 +540,9 @@ class EidonAgent:
     def _chat_completion(self, model: str, messages: list, label: str,
                          max_tokens: int = MAX_PATCH_TOKENS):
         """Make a chat completion request, backing off token caps on provider 402 errors."""
+        if self._credits_exhausted:
+            raise RuntimeError("Skipping LLM call because provider credits are exhausted")
+
         requested_tokens = max_tokens
         for attempt in range(2):
             try:
@@ -549,6 +553,10 @@ class EidonAgent:
                 )
             except Exception as e:
                 err = str(e)
+                if "Insufficient credits" in err:
+                    self._credits_exhausted = True
+                    print("  [{}] Provider credits exhausted -- skipping further LLM calls".format(label))
+                    raise
                 affordable = None
                 match = re.search(r'can only afford (\d+)', err)
                 if match:
