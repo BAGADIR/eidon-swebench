@@ -96,6 +96,7 @@ OUTPUT_FILE         = "predictions.json"
 CHECKPOINT_FILE     = "checkpoint.json"
 RETRY_IDS_OUTPUT    = os.environ.get("RETRY_IDS_OUTPUT_FILE", "retry_ids_next.json")
 MODEL_NAME_TAG      = "eidon-mcp-{}".format(MODEL_PATCH.replace("/", "-"))
+TOKEN_BACKOFF_MARGIN = 256
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -535,6 +536,40 @@ class EidonAgent:
             + self.total_output_tokens * 0.42 / 1_000_000
         )
 
+    def _chat_completion(self, model: str, messages: list, label: str,
+                         max_tokens: int = MAX_PATCH_TOKENS):
+        """Make a chat completion request, backing off token caps on provider 402 errors."""
+        requested_tokens = max_tokens
+        for attempt in range(2):
+            try:
+                return self.client.chat.completions.create(
+                    model=model,
+                    max_tokens=requested_tokens,
+                    messages=messages,
+                )
+            except Exception as e:
+                err = str(e)
+                affordable = None
+                match = re.search(r'can only afford (\d+)', err)
+                if match:
+                    affordable = int(match.group(1))
+                if affordable is None or attempt > 0:
+                    raise
+                retry_tokens = min(requested_tokens - 1, max(512, affordable - TOKEN_BACKOFF_MARGIN))
+                if retry_tokens >= requested_tokens:
+                    retry_tokens = requested_tokens - 1
+                if retry_tokens < 512:
+                    raise
+                print("  [{}] Token cap backoff: {} -> {}".format(label, requested_tokens, retry_tokens))
+                requested_tokens = retry_tokens
+
+    def _rescue_candidate_files(self, task: dict, error: str, bad_patch: str,
+                                repo_dir: str, limit: int = 8) -> list:
+        """Combine patch-derived files with task-derived localization for rescue flows."""
+        candidate_files = self._candidate_patch_files(error, bad_patch)
+        inferred_files = self._infer_task_source_files(task, "", repo_dir, limit=limit)
+        return list(dict.fromkeys(candidate_files + inferred_files))
+
     # ── Repo management ───────────────────────────────────────────────────────
 
     def get_repo_dir(self, repo: str, base_commit: str, tmp_root: str) -> tuple:
@@ -893,9 +928,9 @@ class EidonAgent:
         start = time.time()
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._chat_completion(
                 model=MODEL_PATCH,
-                max_tokens=MAX_PATCH_TOKENS,
+                label="patch",
                 messages=[
                     {"role": "system", "content": SYSTEM_PATCH},
                     {"role": "user",   "content": user_content},
@@ -1210,9 +1245,9 @@ class EidonAgent:
         )
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._chat_completion(
                 model=MODEL_REPAIR,
-                max_tokens=MAX_PATCH_TOKENS,
+                label="test-repair",
                 messages=[
                     {"role": "system", "content": SYSTEM_TEST_REPAIR},
                     {"role": "user",   "content": user_content},
@@ -1329,9 +1364,7 @@ class EidonAgent:
         """Ask the model for full rewritten files, then build a local diff from them."""
         print("  [rewrite] Asking {} for full-file rewrite fallback...".format(MODEL_REPAIR))
 
-        candidate_files = self._candidate_patch_files(error, bad_patch)
-        inferred_files = self._infer_task_source_files(task, "", repo_dir, limit=4)
-        candidate_files = list(dict.fromkeys(candidate_files + inferred_files))
+        candidate_files = self._rescue_candidate_files(task, error, bad_patch, repo_dir, limit=4)
         actual_files = self._collect_actual_file_sections(repo_dir, candidate_files, limit=4)
         if actual_files == "(Not available)":
             print("  [rewrite] No candidate files available for rewrite fallback")
@@ -1358,9 +1391,9 @@ class EidonAgent:
         )
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._chat_completion(
                 model=MODEL_REPAIR,
-                max_tokens=MAX_PATCH_TOKENS,
+                label="rewrite",
                 messages=[
                     {"role": "system", "content": SYSTEM_FILE_REWRITE},
                     {"role": "user",   "content": user_content},
@@ -1400,7 +1433,7 @@ class EidonAgent:
 
         actual_files = self._collect_actual_file_sections(
             repo_dir,
-            self._candidate_patch_files(error, bad_patch),
+            self._rescue_candidate_files(task, error, bad_patch, repo_dir),
         )
 
         test_patch = (task.get("test_patch", "") or "").strip()
@@ -1417,9 +1450,9 @@ class EidonAgent:
         )
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._chat_completion(
                 model=MODEL_REPAIR,
-                max_tokens=MAX_PATCH_TOKENS,
+                label="rescue",
                 messages=[
                     {"role": "system", "content": SYSTEM_RESCUE},
                     {"role": "user",   "content": user_content},
@@ -1478,9 +1511,9 @@ class EidonAgent:
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model=MODEL_REPAIR,    # deepseek-reasoner: thinking mode
-                max_tokens=MAX_PATCH_TOKENS,
+            response = self._chat_completion(
+                model=MODEL_REPAIR,
+                label="repair",
                 messages=[
                     {"role": "system", "content": SYSTEM_REPAIR},
                     {"role": "user",   "content": user_content},
